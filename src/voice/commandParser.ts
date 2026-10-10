@@ -4,7 +4,7 @@ export type VoiceIntent =
   | { type: 'reload' }
   | { type: 'click'; query?: string }
   | { type: 'focus'; query: string }
-  | { type: 'next-field' | 'previous-field' | 'clear-field' | 'cancel' | 'confirm' | 'pause' | 'resume' | 'recenter' | 'help' | 'read-headings' | 'read-important' | 'read-about' | 'read-section' | 'stop-reading' | 'repeat' | 'list-buttons' | 'main-content' | 'new-tab' };
+  | { type: 'review-form' | 'next-field' | 'previous-field' | 'clear-field' | 'cancel' | 'confirm' | 'pause' | 'resume' | 'recenter' | 'help' | 'read-headings' | 'read-important' | 'read-about' | 'read-section' | 'stop-reading' | 'repeat' | 'list-buttons' | 'main-content' | 'new-tab' };
 
 export function parseVoiceCommand(input: string): VoiceIntent | null {
   const text = input.trim().toLowerCase().replace(/[?.!]+$/g, '');
@@ -19,6 +19,7 @@ export function parseVoiceCommand(input: string): VoiceIntent | null {
   if (focus) return { type: 'focus', query: focus[2].trim() };
   if (/^next field$/.test(text)) return { type: 'next-field' };
   if (/^previous field$/.test(text)) return { type: 'previous-field' };
+  if (/^review( the)? (form|submission)$/.test(text)) return { type: 'review-form' };
   if (/^(clear|delete) (the )?(field|input)$/.test(text)) return { type: 'clear-field' };
   if (/^(cancel|stop)$/.test(text)) return { type: 'cancel' };
   if (/^(confirm|submit)$/.test(text)) return { type: 'confirm' };

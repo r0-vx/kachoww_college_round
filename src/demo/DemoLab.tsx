@@ -1,13 +1,21 @@
-import { FormEvent, useState } from 'react';
+import { FormEvent, useEffect, useState } from 'react';
 import { Brand } from '../ui/AppShell';
 import { Icon } from '../shared/icons';
-import { extensionUrl } from '../shared/runtime';
+import { extensionUrl, subscribeToRuntimeMessages } from '../shared/runtime';
+import { handleDictation, handleVoiceTranscript, handleSenseQuery } from '../content/voiceExecutor';
 
 interface FormValues { name: string; email: string; category: string; choice: string; remember: boolean; note: string; }
 
 const initialForm: FormValues = { name: '', email: '', category: 'accessibility', choice: 'head', remember: false, note: '' };
 
 export function DemoLab() {
+  // This is our own practice UI, not content-script support for extension pages.
+  useEffect(() => subscribeToRuntimeMessages(message => {
+    if (message.type === 'VOICE_COMMAND') handleVoiceTranscript(message.transcript);
+    if (message.type === 'DICTATION_TEXT') handleDictation(message.text, message.isFinal);
+    if (message.type === 'FOCUS_FIELD') handleVoiceTranscript(`focus ${message.query}`);
+    if (message.type === 'SENSE_QUERY') return handleSenseQuery(message.query);
+  }), []);
   const [message, setMessage] = useState('No action yet. Activate a real control to see the result here.');
   const [count, setCount] = useState(0);
   const [form, setForm] = useState<FormValues>(initialForm);

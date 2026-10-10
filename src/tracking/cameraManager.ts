@@ -20,6 +20,7 @@ export class CameraManager {
 
   get currentState(): CameraState { return this.state; }
   get currentStream(): MediaStream | null { return this.stream; }
+  get currentDeviceId(): string | undefined { return this.deviceId; }
 
   async start(video: HTMLVideoElement, deviceId?: string): Promise<{ permission: PermissionState; cameras: CameraDevice[] }> {
     if (this.stream) return { permission: 'active', cameras: await this.listCameras() };
@@ -31,6 +32,7 @@ export class CameraManager {
     this.deviceId = deviceId;
     try {
       this.stream = await navigator.mediaDevices.getUserMedia({ video: deviceId ? { deviceId: { exact: deviceId } } : { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false });
+      this.deviceId = this.stream.getVideoTracks()[0]?.getSettings().deviceId ?? deviceId;
       video.srcObject = this.stream;
       video.muted = true;
       await video.play();

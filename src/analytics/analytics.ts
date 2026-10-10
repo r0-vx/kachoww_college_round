@@ -56,7 +56,7 @@ export async function summarizeAnalytics(): Promise<AnalyticsSummary> {
   return {
     sessionStartedAt: events.at(-1)?.timestamp ?? Date.now(),
     totalEvents: events.length,
-    completedTasks: events.filter((event) => event.type === 'task-completed').length,
+    completedTasks: events.filter((event) => event.type === 'task-completed' || event.type === 'submission-confirmed').length,
     completedDwells: events.filter((event) => event.type === 'dwell-completed').length,
     cancelledDwells: events.filter((event) => event.type === 'dwell-cancelled').length,
     voiceCommands: events.filter((event) => event.type === 'voice-command-received').length,

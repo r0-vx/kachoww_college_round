@@ -1,10 +1,17 @@
 import type { NormalizedLandmark } from '@mediapipe/tasks-vision';
+import type { CalibrationGeometry } from '../shared/types';
+import { visibleCameraPoint } from '../tracking/coordinateMapping';
 
 export interface TrackingOverlayFrame {
   face: NormalizedLandmark[] | null;
   hand: NormalizedLandmark[] | null;
   headEnabled: boolean;
   handEnabled: boolean;
+  faceOpacity?: number;
+  handOpacity?: number;
+  geometry?: CalibrationGeometry;
+  mirrored?: boolean;
+  objectFit?: 'cover' | 'contain';
 }
 
 const handConnections: [number, number][] = [
@@ -23,28 +30,32 @@ const handGuide = [
   [.5, .78], [.36, .6], [.43, .35], [.5, .25], [.58, .34], [.68, .45]
 ] as const;
 
-function point(canvas: HTMLCanvasElement, landmark: NormalizedLandmark): [number, number] {
-  // The preview is mirrored for the user, so mirror the overlay coordinates too.
-  return [(1 - landmark.x) * canvas.width, landmark.y * canvas.height];
+function point(canvas: HTMLCanvasElement, landmark: NormalizedLandmark, geometry?: CalibrationGeometry, mirrored = true, objectFit: 'cover' | 'contain' = 'cover'): [number, number] {
+  const corrected = geometry ? visibleCameraPoint({ x: landmark.x, y: landmark.y }, geometry, objectFit) : { x: landmark.x, y: landmark.y };
+  return [(mirrored ? 1 - corrected.x : corrected.x) * canvas.width, corrected.y * canvas.height];
 }
 
-function guidePoint(canvas: HTMLCanvasElement, [x, y]: readonly [number, number]): [number, number] {
-  return [(1 - x) * canvas.width, y * canvas.height];
+function guidePoint(canvas: HTMLCanvasElement, [x, y]: readonly [number, number], mirrored = true): [number, number] {
+  return [(mirrored ? 1 - x : x) * canvas.width, y * canvas.height];
 }
 
-function drawDots(context: CanvasRenderingContext2D, points: [number, number][], color: string, radius: number): void {
+function drawDots(context: CanvasRenderingContext2D, points: [number, number][], color: string, radius: number, opacity = 1): void {
+  context.save();
+  context.globalAlpha = opacity;
   context.fillStyle = color;
   for (const [x, y] of points) {
     context.beginPath();
     context.arc(x, y, radius, 0, Math.PI * 2);
     context.fill();
   }
+  context.restore();
 }
 
-function drawGuide(context: CanvasRenderingContext2D, canvas: HTMLCanvasElement, points: readonly (readonly [number, number])[], color: string): void {
-  const mapped = points.map((item) => guidePoint(canvas, item));
+function drawGuide(context: CanvasRenderingContext2D, canvas: HTMLCanvasElement, points: readonly (readonly [number, number])[], color: string, opacity = 1, mirrored = true): void {
+  const mapped = points.map((item) => guidePoint(canvas, item, mirrored));
   context.save();
   context.setLineDash([5, 7]);
+  context.globalAlpha = opacity;
   context.strokeStyle = `${color}99`;
   context.lineWidth = Math.max(1.5, canvas.width / 500);
   context.beginPath();
@@ -54,7 +65,7 @@ function drawGuide(context: CanvasRenderingContext2D, canvas: HTMLCanvasElement,
   }
   context.stroke();
   context.restore();
-  drawDots(context, mapped, color, Math.max(2.5, canvas.width / 120));
+  drawDots(context, mapped, color, Math.max(2.5, canvas.width / 120), opacity);
 }
 
 export function clearTrackingOverlay(canvas: HTMLCanvasElement | null): void {
@@ -78,33 +89,36 @@ export function drawTrackingOverlay(canvas: HTMLCanvasElement | null, frame: Tra
   const context = canvas.getContext('2d');
   if (!context) return;
   context.clearRect(0, 0, canvas.width, canvas.height);
+  const mirrored = frame.mirrored ?? true;
+  const objectFit = frame.objectFit ?? frame.geometry?.objectFit ?? 'cover';
 
   if (frame.headEnabled) {
     if (frame.face?.length) {
-      drawDots(context, frame.face.map((landmark) => point(canvas, landmark)), 'rgba(125, 211, 252, .88)', Math.max(1.2, canvas.width / 700));
+      drawDots(context, frame.face.map((landmark) => point(canvas, landmark, frame.geometry, mirrored, objectFit)), 'rgba(125, 211, 252, .88)', Math.max(1.2, canvas.width / 700), frame.faceOpacity ?? 1);
     } else {
-      drawGuide(context, canvas, faceGuide, '#7dd3fc');
+      drawGuide(context, canvas, faceGuide, '#7dd3fc', frame.faceOpacity ?? 1, mirrored);
     }
   }
 
   if (frame.handEnabled) {
     if (frame.hand?.length) {
       context.save();
+      context.globalAlpha = frame.handOpacity ?? 1;
       context.strokeStyle = 'rgba(74, 222, 128, .9)';
       context.lineWidth = Math.max(2, canvas.width / 420);
       for (const [from, to] of handConnections) {
         if (!frame.hand[from] || !frame.hand[to]) continue;
-        const start = point(canvas, frame.hand[from]);
-        const end = point(canvas, frame.hand[to]);
+        const start = point(canvas, frame.hand[from], frame.geometry, mirrored, objectFit);
+        const end = point(canvas, frame.hand[to], frame.geometry, mirrored, objectFit);
         context.beginPath();
         context.moveTo(start[0], start[1]);
         context.lineTo(end[0], end[1]);
         context.stroke();
       }
       context.restore();
-      drawDots(context, frame.hand.map((landmark) => point(canvas, landmark)), '#4ade80', Math.max(2.4, canvas.width / 260));
+      drawDots(context, frame.hand.map((landmark) => point(canvas, landmark, frame.geometry, mirrored, objectFit)), '#4ade80', Math.max(2.4, canvas.width / 260), frame.handOpacity ?? 1);
     } else {
-      drawGuide(context, canvas, handGuide, '#4ade80');
+      drawGuide(context, canvas, handGuide, '#4ade80', frame.handOpacity ?? 1, mirrored);
     }
   }
 }

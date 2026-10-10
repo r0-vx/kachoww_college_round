@@ -1,6 +1,7 @@
 html:has(.touchview-shell),body:has(.touchview-shell){min-width:320px;min-height:100%;overflow:hidden}
 .touchview-shell{position:relative;min-height:100vh;isolation:isolate;color:#eff8ff;background:#06121f;overflow:auto}
 .touchview-camera{position:fixed;inset:0;width:100%;height:100%;object-fit:cover;z-index:-3;background:#020817}
+.touchview-landmarks{position:fixed;inset:0;width:100%;height:100%;z-index:-1;pointer-events:none}
 .touchview-scrim{position:fixed;inset:0;z-index:-2;background:linear-gradient(120deg,rgba(4,15,28,.72),rgba(4,15,28,.35) 52%,rgba(4,15,28,.68))}
 .touchview-toolbar{position:sticky;top:0;z-index:30;display:flex;align-items:center;justify-content:space-between;gap:20px;padding:15px clamp(16px,3vw,40px);border-bottom:1px solid rgba(150,220,255,.22);background:rgba(4,15,28,.78);backdrop-filter:blur(18px)}
 .touchview-toolbar strong{display:block;margin-top:4px;font:600 18px/1.1 'Space Grotesk',sans-serif}

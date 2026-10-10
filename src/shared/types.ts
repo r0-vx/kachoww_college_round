@@ -10,6 +10,9 @@ export type TrackingPhase =
   | 'reinitializing'
   | 'error';
 
+export type EngineState = 'STOPPED' | 'STARTING' | 'READY' | 'RUNNING' | 'PAUSED' | 'TRACKING_LOST' | 'ERROR' | 'STOPPING';
+export type PointerSource = 'none' | 'head' | 'hand' | 'touchview-hand' | 'voice';
+
 export type PermissionState = 'unknown' | 'prompt' | 'granted' | 'denied' | 'unavailable' | 'active' | 'paused' | 'stopped';
 
 export type ControlMode = 'head' | 'hand' | 'voice' | 'dictation' | 'sense' | 'touchview';
@@ -17,19 +20,79 @@ export type MicrophoneState = 'unknown' | 'prompt' | 'granted' | 'denied' | 'act
 export type VoiceState = 'unavailable' | 'idle' | 'listening' | 'processing' | 'speaking' | 'error';
 export type HandGesture = 'pinch' | 'open-palm' | 'release' | 'none';
 
+export type DiagnosticCode =
+  | 'CAMERA_PERMISSION_DENIED' | 'CAMERA_NOT_FOUND' | 'CAMERA_ALREADY_IN_USE' | 'CAMERA_STREAM_FAILED'
+  | 'CAMERA_UNAVAILABLE' | 'VOICE_RECOGNITION_UNAVAILABLE' | 'DICTATION_UNAVAILABLE'
+  | 'MODEL_LOADING' | 'MODEL_LOAD_FAILED' | 'FACE_NOT_DETECTED' | 'HAND_NOT_DETECTED'
+  | 'LOW_TRACKING_CONFIDENCE' | 'CALIBRATION_REQUIRED' | 'CALIBRATION_INVALID'
+  | 'CALIBRATION_QUALITY_LOW' | 'MIRROR_CONFIGURATION_INVALID' | 'VIEWPORT_MAPPING_FAILED'
+  | 'UNSUPPORTED_PAGE' | 'CONTENT_SCRIPT_UNAVAILABLE' | 'TARGET_NOT_FOUND' | 'ACTION_CANCELLED'
+  | 'DUPLICATE_TRACKING_LOOP' | 'VOICE_UNAVAILABLE' | 'STALE_POINTER_SOURCE' | 'DUPLICATE_MESSAGE' | 'ENGINE_STATE_CONFLICT'
+  | 'NEW_TAB_CAMERA_NOT_CONNECTED' | 'NEW_TAB_TRACKER_NOT_CONNECTED' | 'NEW_TAB_NO_POINTER_UPDATES'
+  | 'NEW_TAB_CAMERA_PERMISSION_DENIED' | 'NEW_TAB_CAMERA_STREAM_EMPTY' | 'NEW_TAB_MODEL_NOT_READY'
+  | 'NEW_TAB_CALIBRATION_MISSING' | 'NEW_TAB_STALE_TRACKING';
+
+export interface Diagnostic {
+  code: DiagnosticCode;
+  title: string;
+  explanation: string;
+  recovery: string;
+  module: string;
+  timestamp: number;
+  blocking: boolean;
+}
+
 export type TouchViewCalibrationCorner = 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right';
 
-export interface TouchViewCalibrationPoint {
+export type CalibrationInput = 'head' | 'hand' | 'mixed';
+
+export interface CalibrationGeometry {
+  cameraWidth: number;
+  cameraHeight: number;
+  videoWidth: number;
+  videoHeight: number;
+  displayWidth: number;
+  displayHeight: number;
+  /** The surface used to display the camera during calibration. */
+  surfaceWidth?: number;
+  surfaceHeight?: number;
+  objectFit?: 'cover' | 'contain';
+  viewportWidth: number;
+  viewportHeight: number;
+  devicePixelRatio: number;
+  scrollX: number;
+  scrollY: number;
+}
+
+export interface CalibrationPoint {
   camera: { x: number; y: number };
-  page: { x: number; y: number };
+  /** Raw MediaPipe coordinates retained for diagnostics and recalculation. */
+  rawCamera?: { x: number; y: number };
+  viewport: { x: number; y: number };
 }
 
 export interface TouchViewCalibration {
+  version: 2;
   mirrored: boolean;
-  points: Record<TouchViewCalibrationCorner, TouchViewCalibrationPoint>;
+  input: CalibrationInput;
+  cameraDeviceId?: string;
+  geometry: CalibrationGeometry;
+  points: Record<TouchViewCalibrationCorner, CalibrationPoint>;
   quality: number;
+  validation?: {
+    errors: number[];
+    averageError: number;
+    maximumError: number;
+    threshold: number;
+    completed: number;
+  };
+  /** Validation is an optional quality check after the four-point map is valid. */
+  validationStatus?: 'passed' | 'skipped';
+  qualityStatus?: 'validated' | 'estimated';
   createdAt: number;
 }
+
+export type CalibrationData = TouchViewCalibration;
 
 export type AnalyticsEventType =
   | 'mode-enabled' | 'mode-disabled' | 'pointer-movement' | 'target-highlighted'
@@ -56,13 +119,6 @@ export interface AnalyticsEvent {
   metadata?: Record<string, string | number | boolean>;
 }
 
-export interface CalibrationData {
-  neutral: { x: number; y: number };
-  rangeX: { min: number; max: number };
-  rangeY: { min: number; max: number };
-  createdAt: number;
-}
-
 export interface HandFreeSettings {
   enabled: boolean;
   paused: boolean;
@@ -86,16 +142,25 @@ export interface HandFreeSettings {
   touchViewPaused: boolean;
   touchViewCameraOpacity: number;
   touchViewWebsiteOpacity: number;
+  touchViewScrimOpacity: number;
   touchViewCursorSize: number;
+  touchViewCursorOpacity: number;
+  touchViewHighlightOpacity: number;
+  touchViewFaceOpacity: number;
+  touchViewHandOpacity: number;
+  touchViewContrast: boolean;
   touchViewCursorColor: 'cyan' | 'lime' | 'amber' | 'magenta';
   touchViewHoldDuration: number;
   touchViewFeedbackEnabled: boolean;
+  mirrorCamera: boolean;
   touchViewMirrorCamera: boolean;
   touchViewStableHoldEnabled: boolean;
   touchViewCalibration: TouchViewCalibration | null;
 }
 
 export interface RuntimeStatus {
+  engineState: EngineState;
+  pointerSource: PointerSource;
   trackingPhase: TrackingPhase;
   permission: PermissionState;
   faceDetected: boolean;
@@ -109,6 +174,14 @@ export interface RuntimeStatus {
   handConfidence: number;
   voice: VoiceState;
   voiceMessage?: string;
+  diagnostic?: Diagnostic;
+  cameraOwner: 'dashboard' | 'newtab' | 'none';
+  trackingOwner: 'dashboard' | 'newtab' | 'none';
+  cameraDeviceId?: string;
+  cameraVideoWidth?: number;
+  cameraVideoHeight?: number;
+  cameraTrackCount?: number;
+  lastTrackingUpdate?: number;
   recentAnalytics?: AnalyticsEvent[];
 }
 
@@ -133,24 +206,38 @@ export interface TargetInfo {
 }
 
 export type HandFreeMessage =
+  | { type: 'ENABLE_TOUCHVIEW'; tabId?: number }
+  | { type: 'DISABLE_TOUCHVIEW' }
+  | { type: 'PAUSE_TOUCHVIEW' }
+  | { type: 'RESUME_TOUCHVIEW' }
+  | { type: 'SET_TOUCHVIEW_SETTINGS'; settings: Partial<HandFreeSettings> }
+  // Positions are calibrated, normalized viewport coordinates from the dashboard.
+  | { type: 'POINTER_UPDATE'; position: HandPointerPosition | PointerPosition; gesture?: HandGesture; cameraFrame?: string }
+  | { type: 'TARGET_UPDATE'; target: TargetInfo | null }
+  | { type: 'ACTIVATION_REQUEST'; target: TargetInfo }
+  | { type: 'ACTIVATION_RESULT'; success: boolean; method?: 'pinch' | 'stable-hold'; duration?: number }
+  | { type: 'CALIBRATION_UPDATED'; calibration: CalibrationData | null }
+  | { type: 'CONTENT_SCRIPT_READY' }
+  | { type: 'NEW_TAB_READY' }
+  | { type: 'NEW_TAB_STATE'; settings: HandFreeSettings; status?: Partial<RuntimeStatus> }
+  | { type: 'NEW_TAB_CAMERA_FRAME'; frame?: string; status?: Partial<RuntimeStatus> }
+  | { type: 'NEW_TAB_POINTER_UPDATE'; position: HandPointerPosition | PointerPosition; gesture?: HandGesture; cameraFrame?: string }
+  | { type: 'PAGE_SUPPORTED' }
+  | { type: 'PAGE_UNSUPPORTED'; reason: string }
+  | { type: 'TOUCHVIEW_ERROR'; reason: string; diagnostic?: Diagnostic }
   | { type: 'ENABLE_HAND_FREE'; settings?: Partial<HandFreeSettings> }
   | { type: 'DISABLE_HAND_FREE' }
   | { type: 'PAUSE_INTERACTION'; reason?: string }
   | { type: 'RESUME_INTERACTION' }
   | { type: 'RECENTER_POINTER' }
   | { type: 'UPDATE_SETTINGS'; settings: Partial<HandFreeSettings> }
-  | { type: 'POINTER_MOVEMENT'; position: PointerPosition }
-  | { type: 'HAND_POINTER_MOVEMENT'; position: HandPointerPosition; gesture?: HandGesture }
-  | { type: 'HAND_GESTURE'; gesture: HandGesture; confidence: number }
-  | { type: 'TOUCHVIEW_POINTER_MOVEMENT'; position: HandPointerPosition; gesture: HandGesture; paused: boolean }
-  | { type: 'TOUCHVIEW_CONTROL'; active: boolean; paused: boolean }
   | { type: 'TARGET_HIGHLIGHT'; target: TargetInfo | null }
   | { type: 'DWELL_STARTED'; target: TargetInfo; duration: number }
   | { type: 'DWELL_CANCELLED'; reason: string }
   | { type: 'DWELL_COMPLETED'; target: TargetInfo }
-  | { type: 'TRACKING_STATUS'; status: Partial<Pick<RuntimeStatus, 'trackingPhase' | 'faceDetected' | 'confidence' | 'error' | 'handTracking' | 'handConfidence'>> }
+  | { type: 'TRACKING_STATUS'; status: Partial<Pick<RuntimeStatus, 'engineState' | 'pointerSource' | 'trackingPhase' | 'faceDetected' | 'confidence' | 'error' | 'diagnostic' | 'handTracking' | 'handConfidence' | 'cameraOwner' | 'trackingOwner' | 'cameraDeviceId' | 'cameraVideoWidth' | 'cameraVideoHeight' | 'cameraTrackCount' | 'lastTrackingUpdate'>> & { cameraFrame?: string } }
   | { type: 'PERMISSION_STATUS'; permission: PermissionState; error?: string }
-  | { type: 'ERROR_STATUS'; error: string }
+  | { type: 'ERROR_STATUS'; error: string; diagnostic?: Diagnostic }
   | { type: 'MIC_PERMISSION_STATUS'; microphone: MicrophoneState; error?: string }
   | { type: 'VOICE_STATUS'; voice: VoiceState; message?: string }
   | { type: 'VOICE_COMMAND'; transcript: string }
@@ -169,7 +256,7 @@ export type HandFreeMessage =
   | { type: 'GET_STATE' }
   | { type: 'STATE_RESPONSE'; settings: HandFreeSettings; status: RuntimeStatus }
   | { type: 'GET_ACTIVE_TAB_STATUS' }
-  | { type: 'ACTIVE_TAB_STATUS'; status: Pick<RuntimeStatus, 'currentTabSupported' | 'currentTabTitle' | 'currentTabUrl' | 'error'> }
+  | { type: 'ACTIVE_TAB_STATUS'; status: Pick<RuntimeStatus, 'currentTabSupported' | 'currentTabTitle' | 'currentTabUrl' | 'error' | 'diagnostic'> }
   | { type: 'OPEN_SIDE_PANEL' }
   | { type: 'OPEN_NEW_TAB' };
 
@@ -196,16 +283,25 @@ export const DEFAULT_SETTINGS: HandFreeSettings = {
   touchViewPaused: false,
   touchViewCameraOpacity: 0.72,
   touchViewWebsiteOpacity: 0.9,
+  touchViewScrimOpacity: 0.5,
   touchViewCursorSize: 28,
+  touchViewCursorOpacity: 1,
+  touchViewHighlightOpacity: 1,
+  touchViewFaceOpacity: 0.9,
+  touchViewHandOpacity: 0.95,
+  touchViewContrast: false,
   touchViewCursorColor: 'cyan',
   touchViewHoldDuration: 650,
   touchViewFeedbackEnabled: true,
+  mirrorCamera: true,
   touchViewMirrorCamera: true,
   touchViewStableHoldEnabled: true,
   touchViewCalibration: null
 };
 
 export const DEFAULT_STATUS: RuntimeStatus = {
+  engineState: 'STOPPED',
+  pointerSource: 'none',
   trackingPhase: 'idle',
   permission: 'unknown',
   faceDetected: false,
@@ -214,7 +310,9 @@ export const DEFAULT_STATUS: RuntimeStatus = {
   microphone: 'unknown',
   handTracking: 'idle',
   handConfidence: 0,
-  voice: 'unavailable'
+  voice: 'unavailable',
+  cameraOwner: 'none',
+  trackingOwner: 'none'
 };
 
 export interface PageNode {

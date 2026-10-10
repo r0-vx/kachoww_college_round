@@ -16,27 +16,35 @@ export class SpeechController {
   }
 
   start(mode: RecognitionMode): void {
-    if (!this.supported) { this.setStatus('unavailable', 'Speech recognition is not available in this browser.'); return; }
+    if (!this.supported) { this.setStatus('unavailable', 'VOICE_RECOGNITION_UNAVAILABLE: This browser does not expose Web Speech recognition. Use a supported Chrome build, allow microphone access, then retry. Keyboard input remains available.'); return; }
     this.stop();
     this.mode = mode;
     const ctor = (window as Window & { SpeechRecognition?: new () => SpeechRecognitionLike; webkitSpeechRecognition?: new () => SpeechRecognitionLike }).SpeechRecognition || (window as Window & { webkitSpeechRecognition?: new () => SpeechRecognitionLike }).webkitSpeechRecognition;
     if (!ctor) { this.setStatus('unavailable', 'Speech recognition is not available in this browser.'); return; }
     this.recognition = new ctor();
-    this.recognition.continuous = mode === 'dictation';
+    this.recognition.continuous = true;
     this.recognition.interimResults = mode === 'dictation';
     this.recognition.lang = 'en-US';
     this.recognition.onresult = (event) => {
       for (let index = event.resultIndex; index < event.results.length; index += 1) {
         const result = event.results[index];
+        const command = result[0].transcript.trim().toLowerCase().replace(/[.!?]+$/, '');
+        if (result.isFinal && command === 'start dictation') { this.start('dictation'); return; }
+        if (result.isFinal && /^(stop dictation|stop listening)$/.test(command)) { this.stop(); return; }
+        if (result.isFinal && command === 'start voice commands') { this.start('command'); return; }
         this.callbacks.onTranscript(result[0].transcript, result.isFinal, this.mode);
       }
     };
-    this.recognition.onerror = (event) => this.setStatus('error', event.error || 'Speech recognition failed.');
+    this.recognition.onerror = (event) => {
+      const code = event.error || 'unknown';
+      const recovery = code === 'not-allowed' || code === 'service-not-allowed' ? 'Allow microphone access and check whether this browser permits speech recognition.' : code === 'network' ? 'The browser speech service could not connect. Check your connection, then retry.' : code === 'audio-capture' ? 'No microphone input is available. Connect or select a microphone, then retry.' : 'No usable speech was recognized. Retry in a quieter environment.';
+      this.setStatus('error', `VOICE_RECOGNITION_UNAVAILABLE (${code}): ${recovery}`);
+    };
     this.recognition.onend = () => { if (this.status === 'listening' && this.recognition) this.setStatus('idle'); };
     try { this.recognition.start(); this.setStatus('listening'); } catch { this.setStatus('error', 'The microphone could not be started.'); }
   }
 
-  stop(): void { this.recognition?.stop(); this.recognition = null; if (this.status === 'listening') this.setStatus('idle'); }
+  stop(): void { const current = this.recognition; this.recognition = null; if (current) { current.onresult = null; current.onend = null; current.onerror = null; try { current.abort(); } catch { /* already stopped */ } } if (this.status === 'listening') this.setStatus('idle'); }
   speak(text: string, rate = 1, volume = 1): void {
     if (!('speechSynthesis' in window)) return;
     window.speechSynthesis.cancel();

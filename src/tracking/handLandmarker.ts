@@ -2,6 +2,7 @@ import type { NormalizedLandmark } from '@mediapipe/tasks-vision';
 import { FilesetResolver, HandLandmarker } from '@mediapipe/tasks-vision';
 import type { HandGesture } from '../shared/types';
 import { trackingAssetPath, visionWasmPath } from './modelAssets';
+import { landmarkQuality } from './landmarkQuality';
 
 export interface HandSample { landmarks: NormalizedLandmark[]; confidence: number; }
 
@@ -30,7 +31,7 @@ export class HandLandmarkerAdapter {
     if (!this.landmarker || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return null;
     const result = this.landmarker.detectForVideo(video, time);
     const landmarks = result.landmarks[0];
-    return landmarks ? { landmarks, confidence: 0.82 } : null;
+    return landmarks ? { landmarks, confidence: landmarkQuality(landmarks, 21) } : null;
   }
   close(): void { this.landmarker?.close(); this.landmarker = null; }
 }
@@ -38,16 +39,21 @@ export class HandLandmarkerAdapter {
 function distance(a: NormalizedLandmark, b: NormalizedLandmark): number { return Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z); }
 function clamp(value: number, min = 0.02, max = 0.98): number { return Math.max(min, Math.min(max, value)); }
 
-export function interpretHand(sample: HandSample, pinchThreshold: number, handSensitivity = 1, previous?: HandPointerCoordinates): { x: number; y: number; gesture: HandGesture; confidence: number } {
+export function interpretHand(sample: HandSample, pinchThreshold: number, handSensitivity = 1, previous?: HandPointerCoordinates, smoothing = .62): { x: number; y: number; gesture: HandGesture; confidence: number } {
   const tip = sample.landmarks[8];
   const thumb = sample.landmarks[4];
-  const pinchDistance = distance(tip, thumb);
+  // A palm-relative distance avoids changing the gesture threshold as the
+  // user moves closer to the camera. Keep the legacy slider's units.
+  const palmScale = Math.max(distance(sample.landmarks[0], sample.landmarks[9]), distance(sample.landmarks[5], sample.landmarks[17]), 0.001);
+  const pinchDistance = distance(tip, thumb) / palmScale * 0.2;
   const wrist = sample.landmarks[0];
   const openFingers = [8, 12, 16, 20].filter((index) => distance(sample.landmarks[index], wrist) > distance(sample.landmarks[index - 2], wrist)).length;
   const gesture: HandGesture = pinchDistance < pinchThreshold ? 'pinch' : openFingers >= 4 ? 'open-palm' : 'release';
-  const sensitivity = Math.max(0.65, Math.min(1.6, handSensitivity));
-  const target = { x: clamp(.5 + ((1 - tip.x) - .5) * sensitivity), y: clamp(.5 + (tip.y - .5) * sensitivity) };
+  // Keep the MediaPipe point in camera coordinates here. Mirror correction,
+  // aspect-ratio correction, calibration, and viewport mapping are shared by
+  // head mode, hand mode, TouchView, and the content-script bridge.
+  const target = { x: clamp(tip.x), y: clamp(tip.y) };
   if (!previous) return { ...target, gesture, confidence: sample.confidence };
-  const blend = .38;
+  const blend = Math.max(.05, Math.min(.95, 1 - smoothing));
   return { x: previous.x + (target.x - previous.x) * blend, y: previous.y + (target.y - previous.y) * blend, gesture, confidence: sample.confidence };
 }

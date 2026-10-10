@@ -31,16 +31,22 @@ export class TouchViewGestureMachine {
   }
 
   configure(holdDuration: number, cooldownDuration: number, stableHoldEnabled: boolean): void {
+    const armed = this.pinchArmed;
+    const cooldownUntil = this.cooldownUntil;
     this.holdDuration = holdDuration;
     this.cooldownDuration = cooldownDuration;
     this.stableHoldEnabled = stableHoldEnabled;
     this.reset();
+    this.pinchArmed = armed;
+    this.cooldownUntil = cooldownUntil;
   }
 
   update(input: TouchViewGestureInput): { events: TouchViewGestureEvent[]; activate: boolean } {
     const events: TouchViewGestureEvent[] = [];
+    if (input.gesture !== 'pinch' && input.confidence >= this.confidenceThreshold) { this.release(input.now); this.pinchArmed = true; }
     const lost = input.confidence < this.confidenceThreshold || !input.targetKey;
     if (lost) {
+      if (input.gesture === 'pinch') this.pinchArmed = false;
       if (this.state === 'ACTIVATION_CANDIDATE') events.push({ type: 'hold-cancelled', method: this.candidateMethod ?? undefined, duration: input.now - this.candidateStartedAt });
       if (this.state !== 'IDLE') events.push({ type: 'hand-lost' });
       this.state = 'IDLE';
@@ -50,12 +56,12 @@ export class TouchViewGestureMachine {
     }
 
     if (input.targetKey !== this.targetKey) {
+      if (this.state === 'ACTIVATION_CANDIDATE' && this.candidateMethod === 'pinch' && input.gesture === 'pinch') this.pinchArmed = false;
       if (this.state === 'ACTIVATION_CANDIDATE') events.push({ type: 'hold-cancelled', method: this.candidateMethod ?? undefined, duration: input.now - this.candidateStartedAt });
       this.targetKey = input.targetKey;
       this.candidateMethod = null;
       this.stableHoldActivated = false;
-      this.pinchArmed = true;
-      this.state = 'IDLE';
+      this.state = input.now < this.cooldownUntil ? 'COOLDOWN' : 'IDLE';
       events.push({ type: 'target-hovered' });
     }
 
@@ -72,7 +78,7 @@ export class TouchViewGestureMachine {
         this.candidateMethod = 'pinch';
         this.candidateStartedAt = input.now;
         events.push({ type: 'pinch-started' });
-      } else if (this.stableHoldEnabled && !this.stableHoldActivated) {
+      } else if (input.gesture !== 'pinch' && this.stableHoldEnabled && !this.stableHoldActivated) {
         this.state = 'ACTIVATION_CANDIDATE';
         this.candidateMethod = 'stable-hold';
         this.candidateStartedAt = input.now;

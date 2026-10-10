@@ -1,6 +1,7 @@
 import type { NormalizedLandmark } from '@mediapipe/tasks-vision';
 import { FaceLandmarker, FilesetResolver } from '@mediapipe/tasks-vision';
 import { trackingAssetPath, visionWasmPath } from './modelAssets';
+import { landmarkQuality } from './landmarkQuality';
 
 export interface FaceSample {
   landmarks: NormalizedLandmark[];
@@ -48,7 +49,7 @@ export class FaceLandmarkerAdapter {
     const result = this.landmarker.detectForVideo(video, time);
     const landmarks = result.faceLandmarks[0];
     if (!landmarks) return null;
-    return { landmarks, confidence: 0.85, time };
+    return { landmarks, confidence: landmarkQuality(landmarks, 468), time };
   }
 
   close(): void {

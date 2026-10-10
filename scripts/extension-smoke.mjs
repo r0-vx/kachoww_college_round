@@ -1,0 +1,178 @@
+import { chromium } from 'playwright-core';
+import { mkdtemp, mkdir, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { resolve, join } from 'node:path';
+import assert from 'node:assert/strict';
+
+const profile = await mkdtemp(join(tmpdir(), 'handfree-smoke-'));
+const extension = resolve('dist');
+const browser = await chromium.launchPersistentContext(profile, {
+  executablePath: process.env.HANDFREE_CHROME || 'C:/Users/rohit/AppData/Local/ms-playwright/chromium-1243/chrome-win64/chrome.exe',
+  headless: true, viewport: { width: 1280, height: 900 },
+  args: [`--disable-extensions-except=${extension}`, `--load-extension=${extension}`]
+});
+const checks = []; const errors = [];
+const check = (name, value) => { assert.ok(value, name); checks.push(name); console.log(`PASS ${name}`); };
+browser.on('page', p => { p.on('pageerror', e => errors.push(String(e))); p.on('console', m => { if (m.type() === 'error') errors.push(m.text()); }); });
+browser.on('console', m => { if (m.type() === 'error') errors.push(m.text()); });
+try {
+  const worker = browser.serviceWorkers()[0] || await browser.waitForEvent('serviceworker');
+  const id = new URL(worker.url()).host;
+  const page = await browser.newPage();
+  await browser.route('https://handfree-smoke.test/**', route => route.fulfill({ contentType: 'text/html', body: `<!doctype html><title>HandFree HTTPS integration fixture</title><style>body{font:20px system-ui;padding:180px 100px}button{padding:24px;margin:20px}input,textarea{display:block;margin:20px}</style><h1>Browser interaction test</h1><button id="action" onclick="this.textContent='Activated '+(++window.clicks)">Activate real button</button><button id="other" onclick="this.textContent='Other '+(++window.otherClicks)">Second target</button><label>Name<input id="name"></label><label>Message<textarea id="message"></textarea></label><a href="/next">Navigate</a><script>window.clicks=0;window.otherClicks=0</script>` }));
+  await page.goto('https://handfree-smoke.test/');
+  const dashboard = await browser.newPage();
+  await dashboard.goto(`chrome-extension://${id}/dashboard.html`);
+  await dashboard.locator('h1').first().waitFor();
+  check('extension dashboard loads', (await dashboard.title()).includes('HandFree'));
+  const send = msg => dashboard.evaluate(msg => chrome.runtime.sendMessage(msg), msg);
+  const tabId = await dashboard.evaluate(async url => (await chrome.tabs.query({})).find(tab => tab.url === url).id, page.url());
+  const geometry = { cameraWidth: 1280, cameraHeight: 720, videoWidth: 640, videoHeight: 360, displayWidth: 640, displayHeight: 360, viewportWidth: 1280, viewportHeight: 900, devicePixelRatio: 1, scrollX: 0, scrollY: 0 };
+  const calibration = { version: 2, input: 'hand', mirrored: true, geometry, quality: .95, createdAt: 123456789, points: { 'top-left': { camera: { x: .1, y: .1 }, viewport: { x: .08, y: .1 } }, 'top-right': { camera: { x: .9, y: .1 }, viewport: { x: .92, y: .1 } }, 'bottom-left': { camera: { x: .1, y: .9 }, viewport: { x: .08, y: .9 } }, 'bottom-right': { camera: { x: .9, y: .9 }, viewport: { x: .92, y: .9 } } } };
+  await send({ type: 'CALIBRATION_UPDATED', calibration });
+  await send({ type: 'UPDATE_SETTINGS', settings: { touchViewHoldDuration: 650, touchViewStableHoldEnabled: false } });
+  // Exercise the real dashboard path: the dashboard is the active extension
+  // page, so the worker must recover the normal HTTPS tab without a tabId.
+  await dashboard.evaluate(async () => chrome.storage.session.remove('handfree-control-tab-id'));
+  check('dashboard enable selects supported webpage', (await send({ type: 'ENABLE_TOUCHVIEW' })).type === 'PAGE_SUPPORTED');
+  await page.locator('#handfree-touchview-root').waitFor();
+  check('overlay exists over HTTPS webpage', await page.locator('#handfree-touchview-root').count() === 1);
+  const automatic = await browser.newPage();
+  await automatic.goto('https://handfree-smoke.test/automatic');
+  await automatic.locator('#handfree-touchview-root').waitFor();
+  check('new supported tab auto-connects while HandFree is enabled', await automatic.locator('#handfree-touchview-root').count() === 1);
+  await automatic.reload();
+  await automatic.locator('#handfree-touchview-root').waitFor();
+  check('new tab reload reconnects without another enable command', await automatic.locator('#handfree-touchview-root').count() === 1);
+  await page.bringToFront();
+  const box = await page.locator('#action').boundingBox();
+  const point = { x: (box.x + box.width / 2) / 1280, y: (box.y + box.height / 2) / 900, confidence: .95, source: 'hand-tracking' };
+  const frame = (gesture = 'release', position = point) => send({ type: 'POINTER_UPDATE', position, gesture });
+  await frame();
+  check('pointer arrives and real target highlights', await page.locator('#handfree-touchview-root .outline').isVisible());
+  await frame('pinch');
+  for (let i = 0; i < 8; i++) { await new Promise(r => setTimeout(r, 100)); await frame('pinch'); }
+  check('stable pinch activates real webpage button once', await page.evaluate(() => window.clicks) === 1);
+  const other = await page.locator('#other').boundingBox();
+  const otherPoint = { ...point, x: (other.x + other.width / 2) / 1280, y: (other.y + other.height / 2) / 900 };
+  for (let i = 0; i < 9; i++) { await frame('pinch', otherPoint); await new Promise(r => setTimeout(r, 100)); }
+  check('held pinch cannot click a second target', await page.evaluate(() => window.otherClicks) === 0);
+  await send({ type: 'PAUSE_TOUCHVIEW' }); await frame('pinch');
+  check('pause cancels interaction', (await page.locator('#handfree-touchview-root #pause').textContent()) === 'Resume');
+  await send({ type: 'RESUME_TOUCHVIEW' });
+  check('resume restores interaction', (await page.locator('#handfree-touchview-root #pause').textContent()) === 'Pause');
+  await send({ type: 'UPDATE_SETTINGS', settings: { touchViewStableHoldEnabled: true } });
+  await frame('release', otherPoint); await new Promise(r => setTimeout(r, 750));
+  check('stale tracking never fires a delayed hold', await page.evaluate(() => window.otherClicks) === 0);
+  for (let i = 0; i < 9; i++) { await frame('release', otherPoint); await new Promise(r => setTimeout(r, 100)); }
+  check('stable hold activates real control', await page.evaluate(() => window.otherClicks) === 1);
+  await send({ type: 'UPDATE_SETTINGS', settings: { dwellDuration: 700, dwellEnabled: true } });
+  // A mode change must not bypass the previous activation's 900ms cooldown.
+  for (let i = 0; i < 23; i++) { await frame('release', { ...point, source: 'head-tracking' }); await new Promise(r => setTimeout(r, 100)); }
+  check('head-source dwell activates a real control', await page.evaluate(() => window.clicks) === 2);
+  await page.reload(); await page.locator('#handfree-touchview-root').waitFor();
+  check('reload reconnects overlay', await page.locator('#handfree-touchview-root').count() === 1);
+  await page.goto('https://handfree-smoke.test/next'); await page.locator('#handfree-touchview-root').waitFor();
+  check('navigation reconnects overlay', await page.locator('#handfree-touchview-root').count() === 1);
+  const second = await browser.newPage(); await second.goto('https://handfree-smoke.test/second');
+  const secondId = await dashboard.evaluate(async url => (await chrome.tabs.query({})).find(tab => tab.url === url).id, second.url());
+  await second.locator('#handfree-touchview-root').waitFor();
+  check('second supported tab auto-connects without dashboard redirect', await second.locator('#handfree-touchview-root').count() === 1);
+  await automatic.bringToFront();
+  check('switching tabs preserves the overlay', await automatic.locator('#handfree-touchview-root').count() === 1);
+  await second.bringToFront();
+  check('second tab remains independently connected after switching back', await second.locator('#handfree-touchview-root').count() === 1);
+  assert.deepEqual((await send({ type: 'GET_STATE' })).settings.calibration, calibration);
+  check('saved calibration is reused unchanged across tabs', true);
+  await second.locator('#handfree-touchview-root #settings').click();
+  check('overlay settings drawer opens', await second.locator('#handfree-touchview-root .drawer').isVisible());
+  await second.locator('#handfree-touchview-root [data-key="touchViewWebsiteOpacity"]').fill('0.5');
+  check('website visibility leaves cursor and controls independently visible', await second.locator('#handfree-touchview-root .veil').evaluate(el => el.style.opacity) === '0.5' && await second.locator('#handfree-touchview-root .bar').evaluate(el => getComputedStyle(el).opacity) === '1');
+  await second.locator('#handfree-touchview-root #settings').click();
+  await send({ type: 'FOCUS_FIELD', query: 'name' });
+  await send({ type: 'DICTATION_TEXT', text: 'A complete dictated sentence.', isFinal: true });
+  check('dictation executor writes to focused field', await second.locator('#name').inputValue() === 'A complete dictated sentence.');
+  await send({ type: 'DICTATION_TEXT', text: 'interim', isFinal: false });
+  check('interim dictation does not duplicate text', await second.locator('#name').inputValue() === 'A complete dictated sentence.');
+  await send({ type: 'VOICE_COMMAND', transcript: 'clear field' });
+  check('voice clear-field executor works', await second.locator('#name').inputValue() === '');
+  await send({ type: 'DISABLE_TOUCHVIEW' });
+  check('exit removes overlay', await second.locator('#handfree-touchview-root').count() === 0);
+  await second.reload();
+  check('exited overlay stays disabled after reload', await second.locator('#handfree-touchview-root').count() === 0);
+  await send({ type: 'ENABLE_TOUCHVIEW', tabId: secondId });
+  check('re-enable after exit and reload works', await second.locator('#handfree-touchview-root').count() === 1);
+  const newtab = await browser.newPage(); await newtab.goto(`chrome-extension://${id}/newtab.html`);
+  await newtab.getByRole('heading', { name: 'Move through the web at your own pace.' }).waitFor();
+  const newtabManifest = await newtab.evaluate(async () => JSON.parse(await (await fetch('manifest.json')).text()));
+  check('manifest registers HandFree New Tab replacement', newtabManifest.chrome_url_overrides?.newtab === 'newtab.html');
+  check('HandFree New Tab exposes real search and camera controls', await newtab.locator('#handfree-newtab-search').count() === 1 && await newtab.getByRole('button', { name: /camera setup|control center/i }).count() >= 1);
+  check('New Tab exposes a real webcam video contract', await newtab.locator('video.newtab-webcam-video').evaluate(video => video.autoplay && video.muted && video.playsInline && video.clientWidth > 0 && video.clientHeight > 0));
+  check('New Tab exposes connection diagnostics and recovery controls', await newtab.locator('.newtab-status').count() === 1 && await newtab.getByRole('button', { name: 'Reconnect camera' }).count() === 1 && await newtab.locator('.newtab-debug').count() === 1);
+  await send({ type: 'DISABLE_TOUCHVIEW' });
+  await newtab.getByRole('button', { name: 'Enable TouchView' }).click();
+  await newtab.locator('#handfree-touchview-root').waitFor();
+  check('HandFree New Tab enables TouchView without redirecting', new URL(newtab.url()).pathname.endsWith('/newtab.html'));
+  await send({ type: 'TRACKING_STATUS', status: { engineState: 'RUNNING', permission: 'active', trackingPhase: 'tracking', handTracking: 'tracking', handConfidence: .9, cameraOwner: 'dashboard', trackingOwner: 'dashboard', cameraTrackCount: 1, cameraVideoWidth: 1280, cameraVideoHeight: 720, lastTrackingUpdate: Date.now(), cameraFrame: 'data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////2wBDAf//////////////////////////////////////////////////////////////////////////////////////wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAf/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIQAxAAAAH/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAEFAqf/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAEDAQE/AX//xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAECAQE/AX//xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAY/Aqf/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAE/IV//2gAMAwEAAgADAAAAEP/EABQRAQAAAAAAAAAAAAAAAAAAABD/2gAIAQMBAT8QH//EABQRAQAAAAAAAAAAAAAAAAAAABD/2gAIAQIBAT8QH//EABQQAQAAAAAAAAAAAAAAAAAAABD/2gAIAQEAAT8QH//Z' } });
+  await newtab.waitForTimeout(100);
+  check('New Tab receives the camera-owner frame bridge', await newtab.locator('img.newtab-webcam').count() === 1 && await newtab.locator('.newtab-status').innerText().then(text => text.includes('Control Center owner')));
+  check('New Tab reports tracking state from the owner', await newtab.locator('.newtab-status').innerText().then(text => text.includes('Hand detected')));
+  await newtab.bringToFront();
+  const searchBox = await newtab.locator('#handfree-newtab-search').boundingBox();
+  const newtabPoint = { x: (searchBox.x + searchBox.width / 2) / 1280, y: (searchBox.y + searchBox.height / 2) / 900, confidence: .95, source: 'hand-tracking' };
+  await frame('release', newtabPoint);
+  check('New Tab pointer highlights the real search field', await newtab.locator('#handfree-touchview-root .outline').isVisible());
+  await frame('pinch', newtabPoint); for (let i = 0; i < 8; i++) { await new Promise(r => setTimeout(r, 100)); await frame('pinch', newtabPoint); }
+  check('New Tab pinch activates the real search field', await newtab.evaluate(() => document.activeElement?.id) === 'handfree-newtab-search');
+  await newtab.locator('#handfree-touchview-root #settings').click();
+  await newtab.locator('#handfree-touchview-root [data-key="touchViewWebsiteOpacity"]').fill('0.5');
+  await newtab.locator('#handfree-touchview-root [data-key="touchViewScrimOpacity"]').fill('0.2');
+  await newtab.waitForTimeout(150);
+  check('New Tab keeps opacity controls independent', await newtab.locator('.newtab-interface').evaluate(el => el.style.opacity) === '0.5' && await newtab.locator('.newtab-scrim').evaluate(el => el.style.opacity) === '0.2' && await newtab.locator('#handfree-touchview-root .bar').evaluate(el => getComputedStyle(el).opacity) === '1');
+  await newtab.reload(); await newtab.locator('#handfree-touchview-root').waitFor();
+  check('New Tab reload reconnects TouchView', true);
+  const blocked = await browser.newPage(); await blocked.goto(`chrome-extension://${id}/demo.html`);
+  const blockedId = await dashboard.evaluate(async url => (await chrome.tabs.query({})).find(tab => tab.url === url).id, blocked.url());
+  check('unsupported extension page returns clear reason', (await send({ type: 'ENABLE_TOUCHVIEW', tabId: blockedId })).type === 'PAGE_UNSUPPORTED');
+  await send({ type: 'FOCUS_FIELD', query: 'full name' });
+  await send({ type: 'DICTATION_TEXT', text: 'Alex Browser', isFinal: true });
+  await send({ type: 'FOCUS_FIELD', query: 'email' });
+  await send({ type: 'DICTATION_TEXT', text: 'alex@example.test', isFinal: true });
+  await send({ type: 'FOCUS_FIELD', query: 'message' });
+  await send({ type: 'DICTATION_TEXT', text: 'This complete sentence came through the real dictation executor.', isFinal: true });
+  await send({ type: 'VOICE_COMMAND', transcript: 'review form' });
+  await blocked.getByRole('dialog').waitFor();
+  await send({ type: 'VOICE_COMMAND', transcript: 'confirm' });
+  check('real React Demo Lab form accepts dictation, review and confirmation', (await blocked.locator('.demo-status').textContent()).includes('confirmed for Alex Browser'));
+  // The demo page is intentionally an internal practice surface. Select it
+  // explicitly for Sense so the check is independent of browser focus order.
+  await dashboard.evaluate(tabId => chrome.storage.session.set({ 'handfree-control-tab-id': tabId }), blockedId);
+  const sense = await send({ type: 'SENSE_QUERY', query: 'read headings' });
+  check('Sense returns actual Demo headings', sense?.type === 'SENSE_RESPONSE' && sense.message.includes('Eligibility requirements'));
+  check('completed-task analytics reflect confirmed form', (await send({ type: 'ANALYTICS_SUMMARY_REQUEST' })).summary.completedTasks >= 1);
+  const real = await browser.newPage(); await real.goto('https://example.com');
+  const realId = await dashboard.evaluate(async url => (await chrome.tabs.query({})).find(tab => tab.url === url).id, real.url());
+  check('unmodified public HTTPS page accepts overlay', (await send({ type: 'ENABLE_TOUCHVIEW', tabId: realId })).type === 'PAGE_SUPPORTED');
+  await real.locator('#handfree-touchview-root').waitFor();
+  const link = await real.locator('a').first().boundingBox();
+  const linkPoint = { ...point, x: (link.x + link.width / 2) / 1280, y: (link.y + link.height / 2) / 900 };
+  await frame('release', linkPoint); await frame('pinch', linkPoint);
+  for (let i = 0; i < 8; i++) { await new Promise(r => setTimeout(r, 100)); await frame('pinch', linkPoint); }
+  await real.waitForURL(url => url.host !== 'example.com');
+  check('pointer pinch activates a real public webpage link', new URL(real.url()).host !== 'example.com');
+  const side = await browser.newPage(); await side.goto(`chrome-extension://${id}/sidepanel.html`);
+  check('side panel loads quick controls', (await side.locator('body').innerText()).includes('TouchView'));
+  await side.evaluate(() => chrome.runtime.sendMessage({ type: 'DISABLE_TOUCHVIEW' }));
+  await side.getByRole('switch', { name: 'Enable TouchView' }).click();
+  await side.waitForTimeout(150);
+  check('side-panel enable stays in side panel', new URL(side.url()).pathname.endsWith('/sidepanel.html'));
+  await side.setViewportSize({ width: 375, height: 844 });
+  check('narrow side panel has no horizontal overflow', await side.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+  await mkdir('output', { recursive: true });
+  await dashboard.screenshot({ path: 'output/dashboard-smoke.png', fullPage: true });
+  await second.screenshot({ path: 'output/overlay-smoke.png', fullPage: true });
+  await side.screenshot({ path: 'output/sidepanel-smoke.png', fullPage: true });
+  check('no page runtime exceptions', errors.length === 0);
+  await writeFile('output/extension-smoke.json', JSON.stringify({ checks, errors, input: 'Synthetic normalized pointer/gesture and recognized text messages; no physical camera or microphone certification', profile }, null, 2));
+  console.log(`Passed ${checks.length} integration checks. Camera/voice recognition require physical user verification.`);
+} finally { await browser.close(); }
