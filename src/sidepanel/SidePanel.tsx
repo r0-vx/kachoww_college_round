@@ -4,6 +4,7 @@ import { Icon } from '../shared/icons';
 import { loadSettings, saveSettings, subscribeToSettings } from '../shared/storage';
 import { findSupportedWebpageTab, openDashboardInTab, sendMessage, subscribeToRuntimeMessages } from '../shared/runtime';
 import { DEFAULT_SETTINGS, DEFAULT_STATUS, type HandFreeSettings, type RuntimeStatus } from '../shared/types';
+import { formatConfidence, normalizeRuntimeStatus } from '../shared/sessionState';
 
 export function SidePanel() {
   const [settings, setSettings] = useState<HandFreeSettings>({ ...DEFAULT_SETTINGS });
@@ -16,15 +17,15 @@ export function SidePanel() {
       if (response?.type === 'STATE_RESPONSE') { setSettings(response.settings); setStatus(response.status); }
     });
     void sendMessage({ type: 'GET_ACTIVE_TAB_STATUS' }).then(response => {
-      if (response?.type === 'ACTIVE_TAB_STATUS') setStatus(current => ({ ...current, ...response.status }));
+      if (response?.type === 'ACTIVE_TAB_STATUS') setStatus(current => normalizeRuntimeStatus(current, response.status));
     });
     const stopSettings = subscribeToSettings(setSettings);
     const stopMessages = subscribeToRuntimeMessages(message => {
-      if (message.type === 'TRACKING_STATUS') setStatus(current => ({ ...current, ...message.status }));
-      if (message.type === 'PERMISSION_STATUS') setStatus(current => ({ ...current, permission: message.permission, error: message.error }));
-      if (message.type === 'STATE_RESPONSE') { setSettings(message.settings); setStatus(message.status); }
-      if (message.type === 'VOICE_STATUS') setStatus(current => ({ ...current, voice: message.voice, voiceMessage: message.message }));
-      if (message.type === 'MIC_PERMISSION_STATUS') setStatus(current => ({ ...current, microphone: message.microphone, error: message.error }));
+      if (message.type === 'TRACKING_STATUS') setStatus(current => normalizeRuntimeStatus(current, message.status));
+      if (message.type === 'PERMISSION_STATUS') setStatus(current => normalizeRuntimeStatus(current, { permission: message.permission, error: message.error }));
+      if (message.type === 'STATE_RESPONSE') { setSettings(message.settings); setStatus(normalizeRuntimeStatus(DEFAULT_STATUS, message.status)); }
+      if (message.type === 'VOICE_STATUS') setStatus(current => normalizeRuntimeStatus(current, { voice: message.voice, voiceMessage: message.message }));
+      if (message.type === 'MIC_PERMISSION_STATUS') setStatus(current => normalizeRuntimeStatus(current, { microphone: message.microphone, error: message.error }));
       if (message.type === 'TOUCHVIEW_ERROR' || message.type === 'PAGE_UNSUPPORTED') setNotice(message.reason);
     });
     return () => { stopSettings(); stopMessages(); };
@@ -70,7 +71,7 @@ export function SidePanel() {
     await sendMessage({ type: paused ? 'PAUSE_TOUCHVIEW' : 'RESUME_TOUCHVIEW' });
     await update({ touchViewPaused: paused });
   }
-  const cameraLabel = status.permission === 'active' ? 'Active' : status.permission === 'paused' ? 'Paused' : 'Off';
+  const cameraLabel = status.cameraState === 'active' ? 'Active' : status.cameraState === 'paused' ? 'Paused' : status.cameraState === 'error' ? 'Error' : 'Stopped';
   const touchViewLabel = !settings.touchViewEnabled ? 'Off' : settings.touchViewPaused ? 'Paused' : settings.calibration ? 'Enabled' : 'Calibrate first';
   return <AppShell compact><main className="compact-main">
     <span className="eyebrow">TouchView</span><h1>Your hand. Your web.</h1>
@@ -79,12 +80,12 @@ export function SidePanel() {
       <div className="compact-status"><strong>TouchView</strong><StatusPill label={touchViewLabel} tone={settings.touchViewEnabled ? settings.touchViewPaused ? 'warn' : 'good' : 'neutral'} /></div>
       <div className="control-row"><div className="control-copy"><strong>Enable TouchView</strong><span>Hand tracking with one shared calibration.</span></div><button type="button" className="switch" role="switch" aria-label="Enable TouchView" aria-checked={settings.touchViewEnabled} disabled={busy} onClick={() => void toggleTouchView()}><span /></button></div>
       <div className="button-row"><button className="button button--primary" disabled={!settings.touchViewEnabled || busy} onClick={() => void pauseTouchView()}><Icon name={settings.touchViewPaused ? 'play' : 'pause'} />{settings.touchViewPaused ? 'Resume' : 'Pause'}</button><button className="button" disabled={!settings.touchViewEnabled} onClick={() => void sendMessage({ type: 'RECENTER_POINTER' })}><Icon name="crosshair" />Recenter</button></div>
-      <div className="compact-metrics"><div className="compact-metric">Camera<strong>{cameraLabel}</strong></div><div className="compact-metric">Hand<strong>{status.handTracking === 'tracking' ? 'Detected' : status.handTracking === 'error' ? 'Error' : 'Not detected'}</strong></div><div className="compact-metric">Calibration<strong>{settings.calibration ? 'Saved' : 'Required'}</strong></div><div className="compact-metric">Page connection<strong>{status.currentTabSupported === true ? 'Available' : status.currentTabSupported === false ? 'Unsupported' : 'Unknown'}</strong></div></div>
+      <div className="compact-metrics"><div className="compact-metric">Camera<strong>{cameraLabel}</strong></div><div className="compact-metric">Hand<strong>{status.cameraState !== 'active' && status.cameraState !== 'paused' ? 'Not detected' : status.handTracking === 'tracking' ? 'Detected' : status.handTracking === 'error' ? 'Error' : 'Not detected'}</strong></div><div className="compact-metric">Calibration<strong>{settings.calibration ? 'Saved' : 'Required'}</strong></div><div className="compact-metric">Page connection<strong>{status.currentTabSupported === true ? 'Available' : status.currentTabSupported === false ? 'Unsupported' : 'Unknown'}</strong></div></div>
     </section>
     {notice && <p className="notice" role="status">{notice}</p>}
     {status.error && <p className="notice" role="alert">{status.error}</p>}
     <button className="button" style={{ width: '100%' }} onClick={() => void openDashboardInTab()}><Icon name="external" />Camera and calibration</button>
-    <details className="card compact-card" style={{ marginTop: 16 }}><summary>Diagnostics <span>Tracking and experimental voice status</span></summary><div className="compact-metrics"><div className="compact-metric">Tracking<strong>{status.trackingPhase}</strong></div><div className="compact-metric">Estimated hand confidence<strong>{Math.round(status.handConfidence * 100)}%</strong></div><div className="compact-metric">Microphone<strong>{status.microphone}</strong></div><div className="compact-metric">Voice · experimental<strong>{status.voice}</strong></div></div><p className="privacy-copy">Voice and dictation have not been manually tested.</p></details>
+    <details className="card compact-card" style={{ marginTop: 16 }}><summary>Diagnostics <span>Tracking and experimental voice status</span></summary><div className="compact-metrics"><div className="compact-metric">Tracking<strong>{status.trackingState}</strong></div><div className="compact-metric">Estimated hand confidence<strong>{formatConfidence(status.handConfidence)}</strong></div><div className="compact-metric">Camera consumers<strong>{status.activeCameraConsumers.length}</strong></div><div className="compact-metric">Microphone<strong>{status.microphone}</strong></div><div className="compact-metric">Voice · experimental<strong>{status.voice}</strong></div></div><p className="privacy-copy">Voice and dictation have not been manually tested.</p></details>
     <p className="privacy-copy">Keep the camera dashboard open while tracking. Use Stop camera there to end capture.</p>
   </main></AppShell>;
 }

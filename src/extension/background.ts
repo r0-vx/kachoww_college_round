@@ -4,6 +4,7 @@ import { recordAnalytics, resetAnalytics, summarizeAnalytics } from '../analytic
 import { diagnostic } from '../diagnostics/diagnostics';
 import { calibrationGeometryCompatible } from '../tracking/coordinateMapping';
 import { isControlTargetUrl, openDashboardInTab } from '../shared/runtime';
+import { normalizeRuntimeStatus } from '../shared/sessionState';
 
 let settings: HandFreeSettings = { ...DEFAULT_SETTINGS };
 let status: RuntimeStatus = { ...DEFAULT_STATUS };
@@ -12,6 +13,10 @@ const TOUCHVIEW_TABS_KEY = 'handfree-touchview-tab-ids';
 const touchViewTabs = new Set<number>();
 const unsupportedMessage = 'TouchView cannot control this page because the browser does not allow extensions to inject interaction controls here.';
 let lastTrackingForwardAt = 0;
+
+function updateRuntimeStatus(patch: Partial<RuntimeStatus>): void {
+  status = normalizeRuntimeStatus(status, patch);
+}
 
 function isHandFreeNewTabUrl(url = ''): boolean {
   return url.split(/[?#]/)[0] === chrome.runtime.getURL('newtab.html');
@@ -66,7 +71,7 @@ async function persistTouchViewTabs(): Promise<void> {
 
 function contentScriptError(module = 'background.touchview'): Extract<HandFreeMessage, { type: 'TOUCHVIEW_ERROR' }> {
   const detail = diagnostic('CONTENT_SCRIPT_UNAVAILABLE', module);
-  status = { ...status, error: detail.explanation, diagnostic: detail };
+  updateRuntimeStatus({ error: detail.explanation, diagnostic: detail });
   return { type: 'TOUCHVIEW_ERROR', reason: `CONTENT_SCRIPT_UNAVAILABLE: ${detail.explanation}`, diagnostic: detail };
 }
 
@@ -296,10 +301,10 @@ async function getActiveTabStatus(): Promise<HandFreeMessage> {
   // Page eligibility must not erase or replace camera/calibration failures.
   if (!status.diagnostic || status.diagnostic.code === 'UNSUPPORTED_PAGE') {
     const pageDiagnostic = supported ? undefined : diagnostic('UNSUPPORTED_PAGE', 'background.activeTab');
-    if (pageDiagnostic) status = { ...status, error: pageDiagnostic.explanation, diagnostic: pageDiagnostic };
-    else if (status.diagnostic?.code === 'UNSUPPORTED_PAGE') status = { ...status, error: undefined, diagnostic: undefined };
+    if (pageDiagnostic) updateRuntimeStatus({ error: pageDiagnostic.explanation, diagnostic: pageDiagnostic });
+    else if (status.diagnostic?.code === 'UNSUPPORTED_PAGE') updateRuntimeStatus({ error: undefined, diagnostic: undefined });
   }
-  status = { ...status, currentTabSupported: supported, currentTabTitle: tab?.title, currentTabUrl: tab?.url };
+  updateRuntimeStatus({ currentTabSupported: supported, currentTabTitle: tab?.title, currentTabUrl: tab?.url });
   return { type: 'ACTIVE_TAB_STATUS', status: { currentTabSupported: status.currentTabSupported, currentTabTitle: status.currentTabTitle, currentTabUrl: status.currentTabUrl, error: status.error, diagnostic: status.diagnostic } };
 }
 
@@ -320,7 +325,7 @@ async function clearRecoveredCalibrationDiagnostic(): Promise<void> {
   const persisted = mergeSettings(stored['handfree-settings'] as Partial<HandFreeSettings> | undefined);
   const calibration = persisted.calibration;
   if (!calibration?.geometry || !calibrationGeometryCompatible(calibration, calibration.geometry, undefined, persisted.mirrorCamera)) return;
-  status = { ...status, error: undefined, diagnostic: undefined };
+  updateRuntimeStatus({ error: undefined, diagnostic: undefined });
   await broadcastState();
 }
 
@@ -358,7 +363,7 @@ async function handleMessage(message: HandFreeMessage, sender: chrome.runtime.Me
       await activateAllSupportedTabs();
       await syncTouchViewTabs();
       if (settings.analyticsEnabled && newlyEnabled) await recordAnalytics({ type: 'TOUCHVIEW_ENABLED', timestamp: Date.now(), mode: 'touchview', outcome: 'success' });
-      if (status.diagnostic?.code === 'CONTENT_SCRIPT_UNAVAILABLE') status = { ...status, error: undefined, diagnostic: undefined };
+      if (status.diagnostic?.code === 'CONTENT_SCRIPT_UNAVAILABLE') updateRuntimeStatus({ error: undefined, diagnostic: undefined });
       return { type: 'PAGE_SUPPORTED' };
     }
     case 'DISABLE_TOUCHVIEW':
@@ -494,7 +499,7 @@ async function handleMessage(message: HandFreeMessage, sender: chrome.runtime.Me
       const handLost = message.status.handTracking === 'lost' && status.handTracking !== 'lost';
       const trackingLost = message.status.trackingPhase === 'lost' && status.trackingPhase !== 'lost';
       const { cameraFrame, ...trackingStatus } = message.status;
-      status = { ...status, ...trackingStatus, error: trackingStatus.error ?? status.error, diagnostic: trackingStatus.diagnostic ?? status.diagnostic };
+      updateRuntimeStatus({ ...trackingStatus, error: trackingStatus.error ?? status.error, diagnostic: trackingStatus.diagnostic ?? status.diagnostic });
       const now = Date.now();
       const urgent = handLost || trackingLost || trackingStatus.trackingPhase === 'error' || Boolean(trackingStatus.diagnostic);
       // Pointer messages stay frame-rate and payload-light. Status and the
@@ -502,6 +507,10 @@ async function handleMessage(message: HandFreeMessage, sender: chrome.runtime.Me
       if (urgent || cameraFrame || now - lastTrackingForwardAt >= 125) {
         lastTrackingForwardAt = now;
         await chrome.runtime.sendMessage({ type: 'NEW_TAB_CAMERA_FRAME', ...(cameraFrame ? { frame: cameraFrame } : {}), status: trackingStatus }).catch(() => undefined);
+        // Extension pages such as the side panel are state clients too. Keep
+        // them on the same canonical snapshot without forwarding every video
+        // frame or camera thumbnail.
+        await broadcastState();
       }
       if (!message.status.diagnostic && !message.status.error) await clearRecoveredCalibrationDiagnostic();
       // Cancel pending holds before waiting for analytics persistence.
@@ -524,16 +533,18 @@ async function handleMessage(message: HandFreeMessage, sender: chrome.runtime.Me
       await syncTouchViewTabs();
       return { type: 'STATE_RESPONSE', settings, status };
     case 'PERMISSION_STATUS':
-      status = { ...status, permission: message.permission, error: message.error };
+      updateRuntimeStatus({ permission: message.permission, error: message.error, cameraState: message.permission === 'active' ? 'active' : message.permission === 'paused' ? 'paused' : message.permission === 'stopped' ? 'stopped' : message.permission === 'denied' || message.permission === 'unavailable' ? 'error' : status.cameraState });
+      await broadcastState();
       return undefined;
     case 'ERROR_STATUS':
-      status = { ...status, trackingPhase: 'error', error: message.error, diagnostic: message.diagnostic ?? status.diagnostic };
+      updateRuntimeStatus({ trackingPhase: 'error', trackingState: 'error', error: message.error, diagnostic: message.diagnostic ?? status.diagnostic, cameraState: status.cameraState });
+      await broadcastState();
       return undefined;
     case 'MIC_PERMISSION_STATUS':
-      status = { ...status, microphone: message.microphone, ...(message.error ? { error: message.error } : {}) };
+      updateRuntimeStatus({ microphone: message.microphone, ...(message.error ? { error: message.error } : {}) });
       return undefined;
     case 'VOICE_STATUS':
-      status = { ...status, voice: message.voice, voiceMessage: message.message };
+      updateRuntimeStatus({ voice: message.voice, voiceMessage: message.message });
       return undefined;
     case 'ANALYTICS_EVENT':
       if (settings.analyticsEnabled) await recordAnalytics(message.event);

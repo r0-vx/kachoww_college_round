@@ -45,8 +45,10 @@ export class TrackingController {
   private handInferenceTotalMs = 0;
   private maxLoopMs = 0;
   private droppedFrames = 0;
+  private endedTrack: MediaStreamTrack | null = null;
+  private activeVideo: HTMLVideoElement | null = null;
 
-  constructor(private readonly callbacks: TrackingCallbacks) {}
+  constructor(protected readonly callbacks: TrackingCallbacks) {}
 
   async start(video: HTMLVideoElement, settings: HandFreeSettings, deviceId?: string): Promise<void> {
     if (this.running || this.engineState === 'STARTING' || this.engineState === 'READY' || this.engineState === 'RUNNING' || this.engineState === 'PAUSED' || this.camera.currentStream) return;
@@ -56,12 +58,16 @@ export class TrackingController {
     this.lastVideoTime = -1;
     this.resetPerformance();
     this.handStableFrames = 0;
-    this.callbacks.onStatus({ engineState: 'STARTING', pointerSource: this.pointerSource(settings), permission: 'prompt', trackingPhase: 'camera-ready', error: undefined });
+    this.callbacks.onStatus({ engineState: 'STARTING', pointerSource: this.pointerSource(settings), permission: 'prompt', cameraState: 'requesting', trackingState: 'loading', trackingPhase: 'camera-ready', error: undefined });
     try {
       await this.camera.start(video, deviceId);
       if (token !== this.runToken) return;
+      this.activeVideo = video;
+      const stream = this.camera.currentStream as MediaStream | null;
+      this.endedTrack = stream ? stream.getVideoTracks()[0] ?? null : null;
+      this.endedTrack?.addEventListener('ended', this.onCameraEnded, { once: true });
       this.engineState = 'READY';
-      this.callbacks.onStatus({ engineState: 'READY', permission: 'active', trackingPhase: 'camera-ready', error: undefined });
+      this.callbacks.onStatus({ engineState: 'READY', permission: 'active', cameraState: 'active', trackingState: 'ready', trackingPhase: 'camera-ready', error: undefined });
       await this.loadModels(video, settings);
       if (token !== this.runToken) return;
     } catch (error) {
@@ -73,7 +79,7 @@ export class TrackingController {
     this.lostFrames = 0;
     this.stableFrames = 0;
     this.handPointer = { x: .5, y: .5 };
-    this.callbacks.onStatus({ engineState: 'RUNNING', pointerSource: this.pointerSource(settings), trackingPhase: 'tracking', handTracking: settings.enabledModes.includes('hand') ? 'lost' : 'idle' });
+    this.callbacks.onStatus({ engineState: 'RUNNING', pointerSource: this.pointerSource(settings), cameraState: 'active', trackingState: 'tracking', trackingPhase: 'tracking', handTracking: settings.enabledModes.includes('hand') ? 'lost' : 'idle' });
     this.loop(video, token);
   }
 
@@ -92,7 +98,7 @@ export class TrackingController {
     this.landmarker.close();
     this.handLandmarker.close();
     this.engineState = 'STARTING';
-    this.callbacks.onStatus({ engineState: 'STARTING', pointerSource: this.pointerSource(settings), permission: 'active', trackingPhase: 'camera-ready', error: undefined, faceDetected: false, confidence: 0, handTracking: settings.enabledModes.includes('hand') ? 'lost' : 'idle', handConfidence: 0 });
+    this.callbacks.onStatus({ engineState: 'STARTING', pointerSource: this.pointerSource(settings), permission: 'active', cameraState: 'active', trackingState: 'loading', trackingPhase: 'camera-ready', error: undefined, faceDetected: false, confidence: 0, handTracking: settings.enabledModes.includes('hand') ? 'lost' : 'idle', handConfidence: 0 });
     await this.loadModels(video, settings);
     if (token !== this.runToken) return;
     this.running = true;
@@ -100,7 +106,7 @@ export class TrackingController {
     this.lostFrames = 0;
     this.stableFrames = 0;
     this.handPointer = { x: .5, y: .5 };
-    this.callbacks.onStatus({ engineState: 'RUNNING', pointerSource: this.pointerSource(settings), trackingPhase: 'tracking' });
+    this.callbacks.onStatus({ engineState: 'RUNNING', pointerSource: this.pointerSource(settings), cameraState: 'active', trackingState: 'tracking', trackingPhase: 'tracking' });
     this.loop(video, token);
   }
 
@@ -131,7 +137,7 @@ export class TrackingController {
     if (!this.camera.currentStream || this.engineState === 'STOPPED' || this.engineState === 'STOPPING') return;
     this.camera.pause(video);
     this.engineState = 'PAUSED';
-    this.callbacks.onStatus({ engineState: 'PAUSED', permission: 'paused', trackingPhase: 'paused' });
+    this.callbacks.onStatus({ engineState: 'PAUSED', permission: 'paused', cameraState: 'paused', trackingState: 'paused', trackingPhase: 'paused', faceDetected: false, confidence: 0, handTracking: 'idle', handConfidence: 0 });
   }
   resume(video: HTMLVideoElement): void {
     if (!this.camera.currentStream) return;
@@ -139,7 +145,7 @@ export class TrackingController {
     this.engineState = 'RUNNING';
     this.lostFrames = 0;
     this.handStableFrames = 0;
-    this.callbacks.onStatus({ engineState: 'RUNNING', permission: 'active', trackingPhase: 'tracking' });
+    this.callbacks.onStatus({ engineState: 'RUNNING', permission: 'active', cameraState: 'active', trackingState: 'tracking', trackingPhase: 'tracking' });
   }
 
   stop(video: HTMLVideoElement): void {
@@ -148,16 +154,19 @@ export class TrackingController {
     this.runToken += 1;
     this.running = false;
     this.inferenceBusy = false;
+    this.endedTrack?.removeEventListener('ended', this.onCameraEnded);
+    this.endedTrack = null;
     if (this.raf !== undefined) clearTimeout(this.raf);
     this.raf = undefined;
     this.camera.stop(video);
+    this.activeVideo = null;
     this.landmarker.close();
     this.handLandmarker.close();
     this.activeSettings = null;
     this.handPointer = { x: .5, y: .5 };
     this.mapper.reset();
     this.engineState = 'STOPPED';
-    this.callbacks.onStatus({ engineState: 'STOPPED', pointerSource: 'none', permission: 'stopped', trackingPhase: 'idle', faceDetected: false, confidence: 0, handTracking: 'idle', handConfidence: 0 });
+    this.callbacks.onStatus({ engineState: 'STOPPED', pointerSource: 'none', permission: 'stopped', trackingPhase: 'idle', cameraState: 'stopped', trackingState: 'idle', faceDetected: false, confidence: 0, handTracking: 'idle', handConfidence: 0, activeCameraConsumers: [], activeFaceLoops: 0, activeHandLoops: 0, activePointerLoops: 0 });
   }
 
   recenter(): void { this.mapper.reset(true); }
@@ -169,11 +178,22 @@ export class TrackingController {
     this.running = false;
     if (this.raf !== undefined) clearTimeout(this.raf);
     this.raf = undefined;
+    this.endedTrack?.removeEventListener('ended', this.onCameraEnded);
+    this.endedTrack = null;
+    this.activeVideo = null;
     this.camera.stop(video);
     this.landmarker.close();
     this.handLandmarker.close();
     this.mapper.reset();
   }
+
+  private onCameraEnded = (): void => {
+    if (this.engineState !== 'STOPPED' && this.engineState !== 'STOPPING') {
+      const video = this.activeVideo;
+      if (video) this.stop(video);
+      else this.callbacks.onStatus({ cameraState: 'stopped', trackingState: 'idle', permission: 'stopped', trackingPhase: 'idle', faceDetected: false, confidence: 0, handTracking: 'idle', handConfidence: 0, error: 'The camera stream ended.' });
+    }
+  };
 
   private resetPerformance(): void {
     this.performanceWindowStarted = performance.now();
@@ -265,7 +285,7 @@ export class TrackingController {
       const message = error instanceof Error ? error.message : String(error);
       const problem = diagnostic('MODEL_LOAD_FAILED', 'tracking.models');
       this.cleanupAfterStartFailure(video);
-      this.callbacks.onStatus({ permission: 'stopped', trackingPhase: 'error', error: `${problem.explanation} ${message}`, diagnostic: problem });
+      this.callbacks.onStatus({ permission: 'stopped', cameraState: 'error', trackingState: 'error', trackingPhase: 'error', faceDetected: false, confidence: 0, handTracking: 'idle', handConfidence: 0, error: `${problem.explanation} ${message}`, diagnostic: problem });
       this.engineState = 'ERROR';
       return;
     } finally {

@@ -12,6 +12,9 @@ export type TrackingPhase =
 
 export type EngineState = 'STOPPED' | 'STARTING' | 'READY' | 'RUNNING' | 'PAUSED' | 'TRACKING_LOST' | 'ERROR' | 'STOPPING';
 export type PointerSource = 'none' | 'head' | 'hand' | 'touchview-hand' | 'voice';
+export type CameraSessionState = 'idle' | 'requesting' | 'active' | 'paused' | 'stopping' | 'stopped' | 'error';
+export type TrackingSessionState = 'idle' | 'loading' | 'ready' | 'tracking' | 'lost' | 'paused' | 'error';
+export type CameraConsumer = 'dashboard' | 'sidepanel' | 'calibration' | 'touchview' | 'newtab' | 'head' | 'hand';
 
 export type PermissionState = 'unknown' | 'prompt' | 'granted' | 'denied' | 'unavailable' | 'active' | 'paused' | 'stopped';
 
@@ -175,6 +178,8 @@ export interface RuntimeStatus {
   voice: VoiceState;
   voiceMessage?: string;
   diagnostic?: Diagnostic;
+  cameraState: CameraSessionState;
+  trackingState: TrackingSessionState;
   cameraOwner: 'dashboard' | 'newtab' | 'none';
   trackingOwner: 'dashboard' | 'newtab' | 'none';
   cameraDeviceId?: string;
@@ -182,6 +187,10 @@ export interface RuntimeStatus {
   cameraVideoHeight?: number;
   cameraTrackCount?: number;
   lastTrackingUpdate?: number;
+  activeCameraConsumers: CameraConsumer[];
+  activeFaceLoops: number;
+  activeHandLoops: number;
+  activePointerLoops: number;
   performance?: TrackingPerformance;
   recentAnalytics?: AnalyticsEvent[];
 }
@@ -258,7 +267,7 @@ export type HandFreeMessage =
   | { type: 'DWELL_STARTED'; target: TargetInfo; duration: number }
   | { type: 'DWELL_CANCELLED'; reason: string }
   | { type: 'DWELL_COMPLETED'; target: TargetInfo }
-  | { type: 'TRACKING_STATUS'; status: Partial<Pick<RuntimeStatus, 'engineState' | 'pointerSource' | 'trackingPhase' | 'faceDetected' | 'confidence' | 'error' | 'diagnostic' | 'handTracking' | 'handConfidence' | 'cameraOwner' | 'trackingOwner' | 'cameraDeviceId' | 'cameraVideoWidth' | 'cameraVideoHeight' | 'cameraTrackCount' | 'lastTrackingUpdate' | 'performance'>> & { cameraFrame?: string } }
+  | { type: 'TRACKING_STATUS'; status: Partial<Pick<RuntimeStatus, 'engineState' | 'pointerSource' | 'trackingPhase' | 'faceDetected' | 'confidence' | 'error' | 'diagnostic' | 'handTracking' | 'handConfidence' | 'cameraState' | 'trackingState' | 'cameraOwner' | 'trackingOwner' | 'cameraDeviceId' | 'cameraVideoWidth' | 'cameraVideoHeight' | 'cameraTrackCount' | 'lastTrackingUpdate' | 'activeCameraConsumers' | 'activeFaceLoops' | 'activeHandLoops' | 'activePointerLoops' | 'performance'>> & { cameraFrame?: string } }
   | { type: 'PERMISSION_STATUS'; permission: PermissionState; error?: string }
   | { type: 'ERROR_STATUS'; error: string; diagnostic?: Diagnostic }
   | { type: 'MIC_PERMISSION_STATUS'; microphone: MicrophoneState; error?: string }
@@ -334,8 +343,14 @@ export const DEFAULT_STATUS: RuntimeStatus = {
   handTracking: 'idle',
   handConfidence: 0,
   voice: 'unavailable',
+  cameraState: 'idle',
+  trackingState: 'idle',
   cameraOwner: 'none',
-  trackingOwner: 'none'
+  trackingOwner: 'none',
+  activeCameraConsumers: [],
+  activeFaceLoops: 0,
+  activeHandLoops: 0,
+  activePointerLoops: 0
 };
 
 export interface PageNode {

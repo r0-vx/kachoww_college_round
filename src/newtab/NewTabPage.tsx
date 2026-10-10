@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { loadSettings, subscribeToSettings } from '../shared/storage';
 import { sendMessage } from '../shared/runtime';
 import { DEFAULT_SETTINGS, DEFAULT_STATUS, type HandFreeMessage, type HandFreeSettings, type RuntimeStatus } from '../shared/types';
-import { diagnostic } from '../diagnostics/diagnostics';
+import { normalizeRuntimeStatus } from '../shared/sessionState';
 import { TouchViewOverlay } from '../content/touchViewOverlay';
 
 function formatTime(now: Date): string {
@@ -13,13 +13,11 @@ function formatDate(now: Date): string {
   return new Intl.DateTimeFormat(undefined, { weekday: 'long', month: 'long', day: 'numeric' }).format(now);
 }
 
-function cameraLabel(status: RuntimeStatus, localStream: boolean, cameraFrame: boolean): string {
-  if (localStream) return 'Active · New Tab preview';
-  if (status.permission === 'active' && status.cameraOwner === 'dashboard') return cameraFrame ? 'Active · Control Center owner' : 'Active · waiting for live frame';
-  if (status.permission === 'prompt' || status.engineState === 'STARTING') return 'Starting';
-  if (status.permission === 'denied') return 'Permission denied';
-  if (status.permission === 'paused' || status.engineState === 'PAUSED') return 'Paused';
-  if (status.diagnostic?.code.startsWith('NEW_TAB_CAMERA')) return 'Interrupted';
+function cameraLabel(status: RuntimeStatus, cameraFrame: boolean): string {
+  if (status.cameraState === 'active') return cameraFrame ? 'Active · Control Center owner' : 'Active · waiting for live frame';
+  if (status.cameraState === 'requesting') return 'Starting';
+  if (status.cameraState === 'error' || status.permission === 'denied') return 'Camera unavailable';
+  if (status.cameraState === 'paused') return 'Paused';
   return 'Stopped';
 }
 
@@ -43,13 +41,7 @@ export function NewTabPage() {
   const [hasCameraFrame, setHasCameraFrame] = useState(false);
   const [now, setNow] = useState(() => new Date());
   const [notice, setNotice] = useState('TouchView is ready on this HandFree tab.');
-  const [localStream, setLocalStream] = useState<MediaStream | null>(null);
-  const [videoReady, setVideoReady] = useState(false);
-  const [videoMetrics, setVideoMetrics] = useState({ readyState: 0, width: 0, height: 0, tracks: 0 });
   const overlayRef = useRef<TouchViewOverlay | null>(null);
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const localStreamRef = useRef<MediaStream | null>(null);
-  const releaseCameraLock = useRef<(() => void) | null>(null);
   const lastPointerAt = useRef(0);
   const cameraFrameRef = useRef('');
   const webcamBridgeRef = useRef<HTMLImageElement>(null);
@@ -60,7 +52,7 @@ export function NewTabPage() {
     const meaningful = next.error || next.diagnostic || (['cameraOwner', 'engineState', 'handTracking', 'trackingPhase'] as const).some(key => next[key] !== undefined && next[key] !== statusRef.current[key]);
     if (now - lastStatusPaintAt.current < 125 && !meaningful) return;
     lastStatusPaintAt.current = now;
-    const merged = { ...statusRef.current, ...next };
+    const merged = normalizeRuntimeStatus(statusRef.current, next);
     statusRef.current = merged;
     setStatus(merged);
   }
@@ -83,20 +75,6 @@ export function NewTabPage() {
       overlayRef.current.destroy();
       overlayRef.current = null;
     }
-  }
-
-  function releaseLocalCamera() {
-    const release = releaseCameraLock.current;
-    if (release) {
-      releaseCameraLock.current = null;
-      release();
-      return;
-    }
-    localStreamRef.current?.getTracks().forEach(track => track.stop());
-    localStreamRef.current = null;
-    if (videoRef.current) videoRef.current.srcObject = null;
-    setLocalStream(null);
-    setVideoMetrics(current => ({ ...current, tracks: 0, readyState: 0, width: 0, height: 0 }));
   }
 
   useEffect(() => {
@@ -142,65 +120,19 @@ export function NewTabPage() {
       }
     });
     const timer = window.setInterval(() => setNow(new Date()), 1000);
-    setVideoReady(Boolean(videoRef.current));
     return () => {
       alive = false;
       unsubscribe();
       chrome.runtime.onMessage.removeListener(onMessage);
       window.clearInterval(timer);
-      releaseLocalCamera();
       overlayRef.current?.destroy();
       overlayRef.current = null;
     };
   }, []);
 
   async function reconnectCamera() {
-    if (status.cameraOwner === 'dashboard' || status.engineState === 'RUNNING' || status.engineState === 'STARTING') {
-      setNotice('The Control Center owns the single camera stream. Reconnect it there, then return to this tab.');
-      await openControlCenter(true);
-      return;
-    }
-    if (!navigator.mediaDevices?.getUserMedia || !navigator.locks?.request) {
-      const problem = diagnostic('NEW_TAB_CAMERA_NOT_CONNECTED', 'newtab.camera');
-      updateStatus({ error: problem.explanation, diagnostic: problem });
-      setNotice(`${problem.title}: ${problem.recovery}`);
-      return;
-    }
-    await navigator.locks.request('handfree-dashboard-camera', { ifAvailable: true }, async lock => {
-      if (!lock) {
-        const problem = diagnostic('NEW_TAB_CAMERA_NOT_CONNECTED', 'newtab.camera');
-        updateStatus({ error: problem.explanation, diagnostic: problem });
-        setNotice(`${problem.title}: ${problem.recovery}`);
-        return;
-      }
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 360 }, frameRate: { ideal: 24, max: 30 } }, audio: false });
-        const video = videoRef.current;
-        if (!video) throw new Error('New Tab video element is unavailable.');
-        video.srcObject = stream;
-        video.muted = true;
-        await video.play();
-        localStreamRef.current = stream;
-        setLocalStream(stream);
-        setVideoMetrics({ readyState: video.readyState, width: video.videoWidth, height: video.videoHeight, tracks: stream.getVideoTracks().length });
-        updateStatus({ permission: 'active', cameraOwner: 'newtab', trackingOwner: 'none', cameraTrackCount: stream.getVideoTracks().length, cameraVideoWidth: video.videoWidth, cameraVideoHeight: video.videoHeight, error: undefined, diagnostic: undefined });
-        setNotice('Camera active in this New Tab. Tracking remains owned by Control Center; use it to enable MediaPipe tracking.');
-        await new Promise<void>(resolve => {
-          releaseCameraLock.current = () => {
-            localStreamRef.current?.getTracks().forEach(track => track.stop());
-            localStreamRef.current = null;
-            if (videoRef.current) videoRef.current.srcObject = null;
-            setLocalStream(null);
-            setVideoMetrics(current => ({ ...current, tracks: 0, readyState: 0, width: 0, height: 0 }));
-            resolve();
-          };
-        });
-      } catch (error) {
-        const problem = diagnostic(error instanceof DOMException && error.name === 'NotAllowedError' ? 'NEW_TAB_CAMERA_PERMISSION_DENIED' : 'NEW_TAB_CAMERA_STREAM_EMPTY', 'newtab.camera');
-        updateStatus({ permission: error instanceof DOMException && error.name === 'NotAllowedError' ? 'denied' : 'stopped', cameraOwner: 'none', error: problem.explanation, diagnostic: problem });
-        setNotice(`${problem.title}: ${problem.recovery}`);
-      }
-    });
+    setNotice('The Control Center owns the shared camera. Reconnecting it there…');
+    await openControlCenter(true);
   }
 
   async function enableTouchView() {
@@ -216,7 +148,6 @@ export function NewTabPage() {
   }
 
   async function stopCamera() {
-    releaseLocalCamera();
     await sendMessage({ type: 'DISABLE_HAND_FREE' });
     setNotice('Camera stopped. TouchView is disabled and the page remains usable normally.');
   }
@@ -234,12 +165,12 @@ export function NewTabPage() {
 
   const enabled = settings.touchViewEnabled;
   const paused = settings.touchViewPaused || settings.paused;
-  const cameraState = cameraLabel(status, Boolean(localStream), hasCameraFrame);
+  const cameraState = cameraLabel(status, hasCameraFrame);
   const trackingState = trackingLabel(status, lastPointerAt.current);
   const diagnosticText = status.diagnostic ? `${status.diagnostic.title}: ${status.diagnostic.explanation} ${status.diagnostic.recovery}` : '';
 
   return <main className="newtab-page">
-    <video ref={videoRef} className="newtab-webcam-video" autoPlay muted playsInline aria-label="Live webcam background" style={{ opacity: localStream ? settings.touchViewCameraOpacity : 0 }} onLoadedMetadata={() => { setVideoReady(true); setVideoMetrics(current => ({ ...current, readyState: videoRef.current?.readyState ?? 0, width: videoRef.current?.videoWidth ?? 0, height: videoRef.current?.videoHeight ?? 0 })); }} />
+    <video className="newtab-webcam-video" autoPlay muted playsInline aria-label="Shared webcam preview" style={{ opacity: 0 }} />
     <img ref={webcamBridgeRef} className="newtab-webcam" alt="Live webcam background from Control Center" style={{ opacity: settings.touchViewCameraOpacity, display: hasCameraFrame ? 'block' : 'none' }} />
     <div className="newtab-scrim" aria-hidden="true" style={{ opacity: settings.touchViewScrimOpacity }} />
     <section className="newtab-interface" style={{ opacity: settings.touchViewWebsiteOpacity }}>
@@ -250,7 +181,7 @@ export function NewTabPage() {
       <section className="newtab-grid" aria-label="HandFree quick links"><article className="newtab-card"><span className="newtab-card-label">TouchView</span><h2>{enabled ? paused ? 'Paused' : 'Ready to point' : 'Off'}</h2><p>{enabled ? 'The overlay is available on this replacement New Tab page.' : 'Enable it here or open the Control Center to start the camera.'}</p><div className="newtab-actions"><button className="newtab-button newtab-button--primary" onClick={enabled ? togglePause : enableTouchView}>{enabled ? paused ? 'Resume TouchView' : 'Pause TouchView' : 'Enable TouchView'}</button><button className="newtab-button" onClick={() => void openControlCenter(!enabled)}>{enabled ? 'Open Control Center' : 'Start camera setup'}</button>{enabled && <button className="newtab-button newtab-button--danger" onClick={() => void stopCamera()}>Stop camera</button>}</div></article><article className="newtab-card"><span className="newtab-card-label">Calibration</span><h2>{settings.calibration ? `${Math.round(settings.calibration.quality * 100)}% mapped` : 'Not calibrated'}</h2><p>{settings.calibration ? settings.calibration.qualityStatus === 'estimated' ? 'Four-point map saved; optional validation is available.' : 'Shared calibration is ready across supported pages.' : 'Calibrate once in the Control Center and reuse it everywhere.'}</p><button className="newtab-link-button" onClick={() => void openControlCenter()}>Open calibration <span aria-hidden="true">→</span></button></article></section>
       <nav className="newtab-links" aria-label="Useful links"><a href="https://example.com">Example Domain</a><a href="https://www.wikipedia.org">Wikipedia</a><a href="https://github.com">GitHub</a><a href={chrome.runtime.getURL('demo.html')}>Demo Lab</a></nav>
       {notice && <p className="newtab-notice" role="status">{notice}</p>}
-      <details className="newtab-debug"><summary>Connection diagnostics</summary><dl><dt>Video element</dt><dd>{videoReady ? 'ready' : 'present · waiting for metadata'}</dd><dt>Video source</dt><dd>{localStream ? 'MediaStream attached' : hasCameraFrame ? 'Control Center live frame bridge' : 'not connected'}</dd><dt>Video dimensions</dt><dd>{videoMetrics.width} × {videoMetrics.height}</dd><dt>Video ready state</dt><dd>{videoMetrics.readyState}</dd><dt>Camera tracks</dt><dd>{localStream ? videoMetrics.tracks : status.cameraTrackCount ?? 0}</dd><dt>Camera owner</dt><dd>{status.cameraOwner}</dd><dt>Tracking owner</dt><dd>{status.trackingOwner}</dd><dt>Last tracking update</dt><dd>{lastPointerAt.current ? new Date(lastPointerAt.current).toLocaleTimeString() : 'none'}</dd>{status.performance && <><dt>Video FPS</dt><dd>{status.performance.videoFps.toFixed(1)}</dd><dt>Face inference FPS</dt><dd>{status.performance.faceInferenceFps.toFixed(1)} · {status.performance.faceInferenceMs.toFixed(1)} ms</dd><dt>Hand inference FPS</dt><dd>{status.performance.handInferenceFps.toFixed(1)} · {status.performance.handInferenceMs.toFixed(1)} ms</dd><dt>Pointer FPS</dt><dd>{status.performance.pointerFps.toFixed(1)}</dd><dt>Render FPS</dt><dd>{status.performance.renderFps.toFixed(1)}</dd><dt>Active animation loops</dt><dd>{status.performance.activeAnimationLoops}</dd><dt>Average inference</dt><dd>{status.performance.averageInferenceMs.toFixed(1)} ms</dd><dt>Active camera streams</dt><dd>{status.performance.activeCameraStreams}</dd><dt>Active tracking loops</dt><dd>{status.performance.activeTrackingLoops}</dd><dt>Active MediaPipe loops</dt><dd>{status.performance.activeMediaPipeLoops}</dd><dt>Dropped frames</dt><dd>{status.performance.droppedFrames}</dd><dt>Message rate</dt><dd>{status.performance.messageSendRate.toFixed(1)}/s</dd><dt>Main-thread block</dt><dd>{status.performance.mainThreadBlockingMs.toFixed(1)} ms</dd></>}</dl></details>
+      <details className="newtab-debug"><summary>Connection diagnostics</summary><dl><dt>Video source</dt><dd>{hasCameraFrame ? 'Control Center live frame bridge' : 'not connected'}</dd><dt>Video dimensions</dt><dd>{status.cameraVideoWidth ?? 0} × {status.cameraVideoHeight ?? 0}</dd><dt>Camera tracks</dt><dd>{status.cameraTrackCount ?? 0}</dd><dt>Camera owner</dt><dd>{status.cameraOwner}</dd><dt>Tracking owner</dt><dd>{status.trackingOwner}</dd><dt>Last tracking update</dt><dd>{lastPointerAt.current ? new Date(lastPointerAt.current).toLocaleTimeString() : 'none'}</dd>{status.performance && <><dt>Video FPS</dt><dd>{status.performance.videoFps.toFixed(1)}</dd><dt>Face inference FPS</dt><dd>{status.performance.faceInferenceFps.toFixed(1)} · {status.performance.faceInferenceMs.toFixed(1)} ms</dd><dt>Hand inference FPS</dt><dd>{status.performance.handInferenceFps.toFixed(1)} · {status.performance.handInferenceMs.toFixed(1)} ms</dd><dt>Pointer FPS</dt><dd>{status.performance.pointerFps.toFixed(1)}</dd><dt>Render FPS</dt><dd>{status.performance.renderFps.toFixed(1)}</dd><dt>Active animation loops</dt><dd>{status.performance.activeAnimationLoops}</dd><dt>Average inference</dt><dd>{status.performance.averageInferenceMs.toFixed(1)} ms</dd><dt>Active camera streams</dt><dd>{status.performance.activeCameraStreams}</dd><dt>Active tracking loops</dt><dd>{status.performance.activeTrackingLoops}</dd><dt>Active MediaPipe loops</dt><dd>{status.performance.activeMediaPipeLoops}</dd><dt>Dropped frames</dt><dd>{status.performance.droppedFrames}</dd><dt>Message rate</dt><dd>{status.performance.messageSendRate.toFixed(1)}/s</dd><dt>Main-thread block</dt><dd>{status.performance.mainThreadBlockingMs.toFixed(1)} ms</dd></>}</dl></details>
     </section>
     <footer className="newtab-footer"><span>Camera opacity {Math.round(settings.touchViewCameraOpacity * 100)}%</span><span>Webpage opacity {Math.round(settings.touchViewWebsiteOpacity * 100)}%</span><button onClick={() => void openControlCenter()}>Settings</button></footer>
   </main>;
