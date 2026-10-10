@@ -1,1 +1,0 @@
-const e={enabled:!1,paused:!1,headControlEnabled:!1,sensitivity:1,smoothing:.72,dwellDuration:1200,dwellEnabled:!0,cooldownDuration:900,deadZone:.08,calibration:null},n={trackingPhase:"idle",permission:"unknown",faceDetected:!1,confidence:0,currentTabSupported:null};export{n as D,e as a};

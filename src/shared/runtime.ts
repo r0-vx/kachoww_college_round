@@ -19,3 +19,36 @@ export async function getState(): Promise<{ settings: HandFreeSettings; status: 
 export function extensionUrl(path: string): string {
   return isExtensionContext ? chrome.runtime.getURL(path) : `/${path}`;
 }
+
+export async function openDashboardInTab(): Promise<void> {
+  const url = extensionUrl('dashboard.html');
+  if (isExtensionContext && chrome.tabs?.create) {
+    const [active] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    if (active.id && active.url && !/^(chrome|edge|about|brave|view-source|devtools|chrome-extension):/i.test(active.url)) {
+      await chrome.storage.local.set({ 'handfree-control-tab-id': active.id });
+    }
+    await chrome.tabs.create({ url });
+  } else {
+    window.open(url, '_blank', 'noopener,noreferrer');
+  }
+}
+
+export async function openTouchViewInTab(): Promise<void> {
+  const url = extensionUrl('touchview.html');
+  if (isExtensionContext && chrome.tabs?.create) {
+    const [active] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    if (active.id && active.url && !/^(chrome|edge|about|brave|view-source|devtools|chrome-extension):/i.test(active.url)) {
+      await chrome.storage.local.set({ 'handfree-control-tab-id': active.id });
+    }
+    await chrome.tabs.create({ url });
+  } else {
+    window.open(url, '_blank', 'noopener,noreferrer');
+  }
+}
+
+export function subscribeToRuntimeMessages(callback: (message: HandFreeMessage) => void): () => void {
+  if (!isExtensionContext) return () => undefined;
+  const listener = (message: HandFreeMessage) => callback(message);
+  chrome.runtime.onMessage.addListener(listener);
+  return () => chrome.runtime.onMessage.removeListener(listener);
+}

@@ -1,12 +1,13 @@
 import type { ReactNode } from 'react';
 import { Icon } from '../shared/icons';
+import { openDashboardInTab } from '../shared/runtime';
 
 export function Brand() {
   return <div className="brand"><span className="brand-mark"><Icon name="crosshair" /></span><span><strong>HandFree</strong><small>control center</small></span></div>;
 }
 
 export function AppShell({ children, compact = false }: { children: ReactNode; compact?: boolean }) {
-  return <div className={compact ? 'app-shell app-shell--compact' : 'app-shell'}><header className="topbar"><Brand /><span className="build-label">MVP · in-page control only</span></header>{children}</div>;
+  return <div className={compact ? 'app-shell app-shell--compact' : 'app-shell'}><header className="topbar"><Brand /><div className="topbar-actions"><span className="build-label">MVP · in-page control only</span><button className="topbar-action" type="button" onClick={() => void openDashboardInTab()} aria-label="Open HandFree in a full browser tab"><Icon name="external" /><span>Open full page</span></button></div></header>{children}</div>;
 }
 
 export function StatusPill({ label, tone = 'neutral' }: { label: string; tone?: 'neutral' | 'good' | 'warn' | 'bad' }) {

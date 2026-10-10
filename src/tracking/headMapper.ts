@@ -4,14 +4,11 @@ import type { FaceSample } from './faceLandmarker';
 export interface RelativeHeadPosition { x: number; y: number; }
 
 export function relativeHeadPosition(sample: FaceSample): RelativeHeadPosition {
-  const xs = sample.landmarks.map((point) => point.x);
-  const ys = sample.landmarks.map((point) => point.y);
-  const minX = Math.min(...xs);
-  const maxX = Math.max(...xs);
-  const minY = Math.min(...ys);
-  const maxY = Math.max(...ys);
+  // Use the nose position in the camera frame. Normalising by the face bounding
+  // box cancels out the user's actual left/right and up/down movement, making
+  // head control appear frozen unless the user rotates their face.
   const nose = sample.landmarks[1] ?? sample.landmarks[4];
-  return { x: (nose.x - minX) / Math.max(0.001, maxX - minX) - 0.5, y: (nose.y - minY) / Math.max(0.001, maxY - minY) - 0.5 };
+  return { x: (1 - nose.x) - 0.5, y: nose.y - 0.5 };
 }
 
 export class HeadMapper {

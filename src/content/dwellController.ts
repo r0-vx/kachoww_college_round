@@ -28,14 +28,14 @@ export class DwellController {
     if (this.completedForElement === target.element) return;
     this.startedAt = performance.now();
     this.callbacks.onStart(target.info, duration);
-    this.timer = window.setTimeout(() => {
+    this.timer = globalThis.setTimeout(() => {
       this.callbacks.onProgress(1);
       this.callbacks.onComplete(target.info);
       this.completedForElement = target.element;
       this.timer = undefined;
       this.stopFrame();
-    }, duration);
-    this.frame = requestAnimationFrame(() => this.tick(duration));
+    }, duration) as unknown as number;
+    this.frame = this.scheduleFrame(() => this.tick(duration));
   }
 
   resetCompletion(): void {
@@ -44,7 +44,7 @@ export class DwellController {
 
   cancel(reason: string): void {
     if (this.timer !== undefined || this.target) this.callbacks.onCancel(reason);
-    if (this.timer !== undefined) window.clearTimeout(this.timer);
+    if (this.timer !== undefined) globalThis.clearTimeout(this.timer);
     this.timer = undefined;
     this.target = null;
     this.stopFrame();
@@ -57,11 +57,19 @@ export class DwellController {
   private tick(duration: number): void {
     if (this.timer === undefined) return;
     this.callbacks.onProgress(Math.min(1, (performance.now() - this.startedAt) / duration));
-    this.frame = requestAnimationFrame(() => this.tick(duration));
+    this.frame = this.scheduleFrame(() => this.tick(duration));
   }
 
   private stopFrame(): void {
-    if (this.frame !== undefined) cancelAnimationFrame(this.frame);
+    if (this.frame !== undefined) {
+      if (typeof cancelAnimationFrame === 'function') cancelAnimationFrame(this.frame);
+      else globalThis.clearTimeout(this.frame);
+    }
     this.frame = undefined;
+  }
+
+  private scheduleFrame(callback: () => void): number {
+    if (typeof requestAnimationFrame === 'function') return requestAnimationFrame(callback);
+    return globalThis.setTimeout(callback, 16) as unknown as number;
   }
 }

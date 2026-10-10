@@ -1,5 +1,6 @@
 import type { NormalizedLandmark } from '@mediapipe/tasks-vision';
 import { FaceLandmarker, FilesetResolver } from '@mediapipe/tasks-vision';
+import { trackingAssetPath, visionWasmPath } from './modelAssets';
 
 export interface FaceSample {
   landmarks: NormalizedLandmark[];
@@ -13,9 +14,9 @@ export class FaceLandmarkerAdapter {
   async load(onProgress?: (phase: 'loading-model' | 'ready') => void): Promise<void> {
     if (this.landmarker) return;
     onProgress?.('loading-model');
-    const vision = await FilesetResolver.forVisionTasks('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22/wasm');
+    const vision = await FilesetResolver.forVisionTasks(visionWasmPath);
     const options = {
-      baseOptions: { modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task', delegate: 'GPU' },
+      baseOptions: { modelAssetPath: trackingAssetPath('mediapipe/models/face_landmarker.task'), delegate: 'GPU' },
       runningMode: 'VIDEO',
       numFaces: 1,
       minFaceDetectionConfidence: 0.55,
@@ -24,11 +25,21 @@ export class FaceLandmarkerAdapter {
       outputFaceBlendshapes: false,
       outputFacialTransformationMatrixes: false
     } as const;
+    let delegate = 'GPU';
     try {
       this.landmarker = await FaceLandmarker.createFromOptions(vision, options);
-    } catch {
-      this.landmarker = await FaceLandmarker.createFromOptions(vision, { ...options, baseOptions: { ...options.baseOptions, delegate: 'CPU' } });
+    } catch (gpuError) {
+      try {
+        delegate = 'CPU';
+        this.landmarker = await FaceLandmarker.createFromOptions(vision, { ...options, baseOptions: { ...options.baseOptions, delegate: 'CPU' } });
+      } catch (cpuError) {
+        const gpuMessage = gpuError instanceof Error ? gpuError.message : String(gpuError);
+        const cpuMessage = cpuError instanceof Error ? cpuError.message : String(cpuError);
+        console.error('[HandFree] Face model failed on GPU and CPU.', { gpuError, cpuError });
+        throw new Error(`Face model failed to initialize. GPU: ${gpuMessage}. CPU fallback: ${cpuMessage}`);
+      }
     }
+    console.info(`[HandFree] Face Landmarker ready with bundled assets (${delegate}).`);
     onProgress?.('ready');
   }
 

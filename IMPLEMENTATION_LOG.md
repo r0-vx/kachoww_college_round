@@ -40,3 +40,34 @@ The workspace was empty at inspection time: no package manifest, source tree, ex
 - Chrome blocks content scripts on internal/restricted pages. The dashboard reports those pages as unsupported and does not claim system-level mouse control.
 - Automated verification can validate the extension build and UI flows, but reliable head-motion and camera permission tests require a real camera or a browser camera fixture.
 - The Demo Lab is provided as an extension page for this local MVP; no public deployment or repository push is performed.
+
+## A-to-Z first-draft expansion
+
+The existing foundation was extended in place rather than replaced. Added modules cover:
+
+- Head, hand, voice, dictation, and HandFree Sense control modes.
+- MediaPipe Hand Landmarker with index-finger pointer, pinch activation, open-palm pause, release detection, and GPU-to-CPU fallback.
+- Browser Speech Recognition and speech synthesis wrappers with deterministic command parsing.
+- Dictation insertion into the focused local webpage field without storing dictated text.
+- DOM-based page indexing, accessible-name extraction, content ranking, and rule-based Sense answers.
+- IndexedDB event analytics with memory fallback, summaries, event categories, outcomes, and reset control.
+- Expanded Demo Lab navigation, precision targets, recovery scenario, validated form, confirmation dialog, and real audio-first information content.
+- Vitest unit coverage for command parsing, page ranking, gesture interpretation, dwell safety, and analytics summaries.
+
+## A-to-Z verification status
+
+- `npm run typecheck`: passed.
+- `npm test`: passed, 5 files and 8 tests.
+- `npm run build`: passed.
+- Dashboard, side panel, and Demo Lab browser smoke checks: passed with no console errors.
+- Demo validation and confirmation workflow: passed in a real browser.
+- Camera, face tracking, hand tracking, microphone permission, speech recognition, and extension-loaded content-script flows still require manual verification with a real loaded extension and available hardware/browser support.
+
+## New known limitations
+
+- Head and hand MediaPipe models are fetched from their public model/CDN URLs after explicit camera setup; offline model packaging is not included.
+- Hand and head modes share one camera stream and one animation loop, but enabling/disabling camera modes after a stream starts requires restarting camera setup.
+- Web Speech API availability varies by browser; unsupported browsers show an unavailable state.
+- Voice commands require an active supported webpage for page actions. Confirmation-sensitive actions wait for a separate `confirm` command.
+- The Sense layer is rule-based and deliberately does not claim to replace NVDA or another screen reader.
+- `npm install` reported dependency audit findings in the current toolchain; no forced breaking `npm audit fix` was applied.

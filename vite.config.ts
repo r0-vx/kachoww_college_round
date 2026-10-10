@@ -13,6 +13,7 @@ export default defineConfig({
         dashboard: resolve(fileURLToPath(new URL('.', import.meta.url)), 'dashboard.html'),
         sidepanel: resolve(fileURLToPath(new URL('.', import.meta.url)), 'sidepanel.html'),
         demo: resolve(fileURLToPath(new URL('.', import.meta.url)), 'demo.html'),
+        touchview: resolve(fileURLToPath(new URL('.', import.meta.url)), 'touchview.html'),
         background: resolve(fileURLToPath(new URL('.', import.meta.url)), 'src/extension/background.ts'),
         content: resolve(fileURLToPath(new URL('.', import.meta.url)), 'src/extension/content.ts')
       },

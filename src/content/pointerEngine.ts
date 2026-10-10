@@ -1,4 +1,4 @@
-import type { HandFreeMessage, HandFreeSettings, PointerPosition, TargetInfo } from '../shared/types';
+import type { HandFreeMessage, HandFreeSettings, HandPointerPosition, PointerPosition, TargetInfo } from '../shared/types';
 import { DwellController } from './dwellController';
 import { findTargetAt } from './targetDetector';
 
@@ -57,13 +57,13 @@ export class PointerEngine {
 
   updateSettings(settings: HandFreeSettings): void {
     this.settings = settings;
-    this.enabled = settings.enabled && settings.headControlEnabled;
+    this.enabled = settings.enabled && (settings.headControlEnabled || settings.enabledModes.includes('hand'));
     this.paused = settings.paused;
     if (!this.enabled || this.paused) this.dwell.cancel(this.paused ? 'HandFree paused' : 'Head Control disabled');
     this.applyVisibility();
   }
 
-  move(position: PointerPosition): void {
+  move(position: PointerPosition | HandPointerPosition): void {
     if (!this.enabled || this.paused || position.confidence < 0.55 || performance.now() < this.cooldownUntil) return;
     this.currentPosition = { x: Math.max(0.01, Math.min(0.99, position.x)), y: Math.max(0.01, Math.min(0.99, position.y)) };
     const x = this.currentPosition.x * window.innerWidth;
@@ -85,6 +85,19 @@ export class PointerEngine {
     this.dwell.resetCompletion();
     this.pointer.style.transform = `translate3d(${window.innerWidth / 2}px, ${window.innerHeight / 2}px, 0)`;
   }
+
+  activateCurrentTarget(): void {
+    if (!this.enabled || this.paused || !this.currentTarget || performance.now() < this.cooldownUntil) return;
+    if (this.currentTarget.hidden || (this.currentTarget as HTMLButtonElement).disabled || this.currentTarget.getAttribute('aria-disabled') === 'true') return;
+    const target = findTargetAt(this.currentPosition.x * window.innerWidth, this.currentPosition.y * window.innerHeight);
+    if (!target || target.element !== this.currentTarget) return;
+    this.cooldownUntil = performance.now() + this.settings.cooldownDuration;
+    this.dwell.cancel('Gesture activation');
+    this.currentTarget.click();
+    this.emit({ type: 'DWELL_COMPLETED', target: target.info });
+  }
+
+  cancelDwell(reason: string): void { this.dwell.cancel(reason); }
 
   destroy(): void {
     this.dwell.destroy();

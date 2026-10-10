@@ -1,12 +1,13 @@
 import type { SVGProps } from 'react';
 
-export function Icon({ name, ...props }: SVGProps<SVGSVGElement> & { name: 'arrow' | 'camera' | 'check' | 'chevron' | 'crosshair' | 'info' | 'pause' | 'play' | 'refresh' | 'shield' | 'target' | 'warning' }) {
+export function Icon({ name, ...props }: SVGProps<SVGSVGElement> & { name: 'arrow' | 'camera' | 'check' | 'chevron' | 'crosshair' | 'external' | 'info' | 'pause' | 'play' | 'refresh' | 'shield' | 'target' | 'warning' }) {
   const paths: Record<string, string> = {
     arrow: 'M5 12h14m-6-6 6 6-6 6',
     camera: 'M4 7h3l1.5-2h5L15 7h3a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2Zm8 3a3 3 0 1 0 0 6 3 3 0 0 0 0-6Z',
     check: 'm5 12 4 4L19 6',
     chevron: 'm7 10 5 5 5-5',
     crosshair: 'M12 2v4m0 12v4M2 12h4m12 0h4M12 7a5 5 0 1 0 0 10 5 5 0 0 0-0-10Z',
+    external: 'M14 3h7v7m0-7-9 9m5 5v3H4V4h3',
     info: 'M12 16v-4m0-4h.01M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z',
     pause: 'M8 5v14m8-14v14',
     play: 'm8 5 11 7-11 7V5Z',
