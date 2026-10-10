@@ -182,6 +182,7 @@ export interface RuntimeStatus {
   cameraVideoHeight?: number;
   cameraTrackCount?: number;
   lastTrackingUpdate?: number;
+  performance?: TrackingPerformance;
   recentAnalytics?: AnalyticsEvent[];
 }
 
@@ -203,6 +204,28 @@ export interface TargetInfo {
   selectorHint: string;
   accessibleName: string;
   tagName: string;
+}
+
+/** Low-overhead counters used to diagnose tracking and overlay performance. */
+export interface TrackingPerformance {
+  videoFps: number;
+  faceInferenceFps: number;
+  handInferenceFps: number;
+  pointerFps: number;
+  renderFps: number;
+  averageInferenceMs: number;
+  faceInferenceMs: number;
+  handInferenceMs: number;
+  activeCameraStreams: number;
+  activeTrackingLoops: number;
+  activeMediaPipeLoops: number;
+  activeAnimationLoops: number;
+  droppedFrames: number;
+  messageSendRate: number;
+  mainThreadBlockingMs: number;
+  cameraWidth: number;
+  cameraHeight: number;
+  updatedAt: number;
 }
 
 export type HandFreeMessage =
@@ -235,7 +258,7 @@ export type HandFreeMessage =
   | { type: 'DWELL_STARTED'; target: TargetInfo; duration: number }
   | { type: 'DWELL_CANCELLED'; reason: string }
   | { type: 'DWELL_COMPLETED'; target: TargetInfo }
-  | { type: 'TRACKING_STATUS'; status: Partial<Pick<RuntimeStatus, 'engineState' | 'pointerSource' | 'trackingPhase' | 'faceDetected' | 'confidence' | 'error' | 'diagnostic' | 'handTracking' | 'handConfidence' | 'cameraOwner' | 'trackingOwner' | 'cameraDeviceId' | 'cameraVideoWidth' | 'cameraVideoHeight' | 'cameraTrackCount' | 'lastTrackingUpdate'>> & { cameraFrame?: string } }
+  | { type: 'TRACKING_STATUS'; status: Partial<Pick<RuntimeStatus, 'engineState' | 'pointerSource' | 'trackingPhase' | 'faceDetected' | 'confidence' | 'error' | 'diagnostic' | 'handTracking' | 'handConfidence' | 'cameraOwner' | 'trackingOwner' | 'cameraDeviceId' | 'cameraVideoWidth' | 'cameraVideoHeight' | 'cameraTrackCount' | 'lastTrackingUpdate' | 'performance'>> & { cameraFrame?: string } }
   | { type: 'PERMISSION_STATUS'; permission: PermissionState; error?: string }
   | { type: 'ERROR_STATUS'; error: string; diagnostic?: Diagnostic }
   | { type: 'MIC_PERMISSION_STATUS'; microphone: MicrophoneState; error?: string }

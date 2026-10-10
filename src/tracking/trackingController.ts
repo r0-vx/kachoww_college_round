@@ -1,4 +1,4 @@
-import type { EngineState, HandFreeSettings, HandPointerPosition, PointerSource, RuntimeStatus } from '../shared/types';
+import type { EngineState, HandFreeSettings, HandPointerPosition, PointerSource, RuntimeStatus, TrackingPerformance } from '../shared/types';
 import type { NormalizedLandmark } from '@mediapipe/tasks-vision';
 import { CameraManager } from './cameraManager';
 import { CalibrationSession } from './calibration';
@@ -34,6 +34,17 @@ export class TrackingController {
   private handPointer: HandPointerCoordinates = { x: .5, y: .5 };
   private activeSettings: HandFreeSettings | null = null;
   private calibrationWarningShown = false;
+  private inferenceBusy = false;
+  private performanceWindowStarted = performance.now();
+  private lastPerformanceEmit = 0;
+  private videoFrames = 0;
+  private faceInferences = 0;
+  private handInferences = 0;
+  private pointerUpdates = 0;
+  private faceInferenceTotalMs = 0;
+  private handInferenceTotalMs = 0;
+  private maxLoopMs = 0;
+  private droppedFrames = 0;
 
   constructor(private readonly callbacks: TrackingCallbacks) {}
 
@@ -43,6 +54,7 @@ export class TrackingController {
     this.engineState = 'STARTING';
     this.activeSettings = settings;
     this.lastVideoTime = -1;
+    this.resetPerformance();
     this.handStableFrames = 0;
     this.callbacks.onStatus({ engineState: 'STARTING', pointerSource: this.pointerSource(settings), permission: 'prompt', trackingPhase: 'camera-ready', error: undefined });
     try {
@@ -74,6 +86,7 @@ export class TrackingController {
     const token = ++this.runToken;
     this.engineState = 'STOPPING';
     this.running = false;
+    this.resetPerformance();
     if (this.raf !== undefined) clearTimeout(this.raf);
     this.raf = undefined;
     this.landmarker.close();
@@ -134,6 +147,7 @@ export class TrackingController {
     this.engineState = 'STOPPING';
     this.runToken += 1;
     this.running = false;
+    this.inferenceBusy = false;
     if (this.raf !== undefined) clearTimeout(this.raf);
     this.raf = undefined;
     this.camera.stop(video);
@@ -161,6 +175,59 @@ export class TrackingController {
     this.mapper.reset();
   }
 
+  private resetPerformance(): void {
+    this.performanceWindowStarted = performance.now();
+    this.lastPerformanceEmit = 0;
+    this.videoFrames = 0;
+    this.faceInferences = 0;
+    this.handInferences = 0;
+    this.pointerUpdates = 0;
+    this.faceInferenceTotalMs = 0;
+    this.handInferenceTotalMs = 0;
+    this.maxLoopMs = 0;
+    this.droppedFrames = 0;
+  }
+
+  private emitPerformance(video: HTMLVideoElement, settings: HandFreeSettings, now: number): void {
+    if (now - this.lastPerformanceEmit < 250) return;
+    const elapsed = Math.max(0.001, (now - this.performanceWindowStarted) / 1000);
+    const faceMs = this.faceInferences ? this.faceInferenceTotalMs / this.faceInferences : 0;
+    const handMs = this.handInferences ? this.handInferenceTotalMs / this.handInferences : 0;
+    const performance: TrackingPerformance = {
+      videoFps: this.videoFrames / elapsed,
+      faceInferenceFps: this.faceInferences / elapsed,
+      handInferenceFps: this.handInferences / elapsed,
+      pointerFps: this.pointerUpdates / elapsed,
+      renderFps: 0,
+      averageInferenceMs: (this.faceInferenceTotalMs + this.handInferenceTotalMs) / Math.max(1, this.faceInferences + this.handInferences),
+      faceInferenceMs: faceMs,
+      handInferenceMs: handMs,
+      activeCameraStreams: this.camera.currentStream ? 1 : 0,
+      activeTrackingLoops: this.running ? 1 : 0,
+      // Face and hand inference share this one scheduler; they are model
+      // calls, not independent animation loops.
+      activeMediaPipeLoops: this.running && (settings.enabledModes.includes('head') || settings.enabledModes.includes('hand')) ? 1 : 0,
+      activeAnimationLoops: 0,
+      droppedFrames: this.droppedFrames,
+      messageSendRate: 0,
+      mainThreadBlockingMs: this.maxLoopMs,
+      cameraWidth: video.videoWidth,
+      cameraHeight: video.videoHeight,
+      updatedAt: Date.now()
+    };
+    this.callbacks.onStatus({ performance });
+    this.performanceWindowStarted = now;
+    this.lastPerformanceEmit = now;
+    this.videoFrames = 0;
+    this.faceInferences = 0;
+    this.handInferences = 0;
+    this.pointerUpdates = 0;
+    this.faceInferenceTotalMs = 0;
+    this.handInferenceTotalMs = 0;
+    this.maxLoopMs = 0;
+    this.droppedFrames = 0;
+  }
+
   private loop(video: HTMLVideoElement, token: number): void {
     if (!this.running || token !== this.runToken || (this.engineState !== 'RUNNING' && this.engineState !== 'TRACKING_LOST')) return;
     const settings = this.activeSettings;
@@ -171,11 +238,29 @@ export class TrackingController {
     if (video.paused || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || video.currentTime === this.lastVideoTime) return;
     this.lastVideoTime = video.currentTime;
     const now = performance.now();
+    this.videoFrames += 1;
+    if (this.inferenceBusy) {
+      this.droppedFrames += 1;
+      this.emitPerformance(video, settings, now);
+      return;
+    }
+    this.inferenceBusy = true;
+    const loopStarted = now;
     let sample: ReturnType<FaceLandmarkerAdapter['detect']> = null;
     let handSample: ReturnType<HandLandmarkerAdapter['detect']> = null;
     try {
-      sample = settings.enabledModes.includes('head') ? this.landmarker.detect(video, now) : null;
-      handSample = settings.enabledModes.includes('hand') ? this.handLandmarker.detect(video, now) : null;
+      if (settings.enabledModes.includes('head')) {
+        const started = performance.now();
+        sample = this.landmarker.detect(video, now);
+        this.faceInferenceTotalMs += performance.now() - started;
+        this.faceInferences += 1;
+      }
+      if (settings.enabledModes.includes('hand')) {
+        const started = performance.now();
+        handSample = this.handLandmarker.detect(video, now);
+        this.handInferenceTotalMs += performance.now() - started;
+        this.handInferences += 1;
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const problem = diagnostic('MODEL_LOAD_FAILED', 'tracking.models');
@@ -183,6 +268,9 @@ export class TrackingController {
       this.callbacks.onStatus({ permission: 'stopped', trackingPhase: 'error', error: `${problem.explanation} ${message}`, diagnostic: problem });
       this.engineState = 'ERROR';
       return;
+    } finally {
+      this.inferenceBusy = false;
+      this.maxLoopMs = Math.max(this.maxLoopMs, performance.now() - loopStarted);
     }
     this.callbacks.onLandmarks({ face: sample?.landmarks ?? null, hand: handSample?.landmarks ?? null, headEnabled: settings.enabledModes.includes('head'), handEnabled: settings.enabledModes.includes('hand') });
     const geometry = readCalibrationGeometry(video);
@@ -210,7 +298,7 @@ export class TrackingController {
         if (this.stableFrames > 8) {
           const pointer = this.mapper.map(position, calibration, settings.sensitivity, settings.smoothing, settings.deadZone, sample.confidence, geometry, settings.mirrorCamera);
           this.callbacks.onStatus({ engineState: 'RUNNING', pointerSource: this.pointerSource(settings), trackingPhase: 'tracking', faceDetected: true, confidence: sample.confidence, diagnostic: undefined });
-          if (calibrationValid) this.callbacks.onPointer(pointer);
+          if (calibrationValid) { this.pointerUpdates += 1; this.callbacks.onPointer(pointer); }
         } else this.callbacks.onStatus({ trackingPhase: 'reinitializing', faceDetected: true, confidence: sample.confidence });
       }
     }
@@ -225,9 +313,10 @@ export class TrackingController {
         const mapped = mapCameraToViewport({ x: hand.x, y: hand.y }, calibration, geometry, settings.mirrorCamera);
         const handSensitivity = Math.max(0.65, Math.min(1.6, settings.handSensitivity));
         this.handStableFrames += 1;
-        if (calibrationValid && mapped && this.handStableFrames > 5) this.callbacks.onHand({ x: Math.max(0.01, Math.min(0.99, 0.5 + (mapped.x - 0.5) * handSensitivity)), y: Math.max(0.01, Math.min(0.99, 0.5 + (mapped.y - 0.5) * handSensitivity)), confidence: hand.confidence, source: 'hand-tracking' }, hand.gesture);
+        if (calibrationValid && mapped && this.handStableFrames > 5) { this.pointerUpdates += 1; this.callbacks.onHand({ x: Math.max(0.01, Math.min(0.99, 0.5 + (mapped.x - 0.5) * handSensitivity)), y: Math.max(0.01, Math.min(0.99, 0.5 + (mapped.y - 0.5) * handSensitivity)), confidence: hand.confidence, source: 'hand-tracking' }, hand.gesture); }
       }
     }
+    this.emitPerformance(video, settings, performance.now());
   }
 
   private pointerSource(settings: HandFreeSettings): PointerSource {

@@ -3,7 +3,7 @@ import { AppShell, SectionHeading, StatusPill } from '../ui/AppShell';
 import { Icon } from '../shared/icons';
 import { loadSettings, saveSettings, subscribeToSettings } from '../shared/storage';
 import { extensionUrl, findSupportedWebpageTab, sendMessage } from '../shared/runtime';
-import { DEFAULT_SETTINGS, DEFAULT_STATUS, type CalibrationData, type CalibrationGeometry, type HandFreeSettings, type RuntimeStatus } from '../shared/types';
+import { DEFAULT_SETTINGS, DEFAULT_STATUS, type CalibrationData, type CalibrationGeometry, type HandFreeMessage, type HandFreeSettings, type HandPointerPosition, type PointerPosition, type RuntimeStatus } from '../shared/types';
 import { TrackingController, type TrackingCallbacks } from '../tracking/trackingController';
 import { CALIBRATION_TARGETS, calibrationGeometryCompatible, mapCameraToViewport, mapCameraToViewportDebug, readCalibrationGeometry, type CoordinateMappingDebug, type CoordinatePoint } from '../tracking/coordinateMapping';
 import { summarizeStableSamples, type CalibrationSample, type CalibrationStep } from '../tracking/calibration';
@@ -75,6 +75,75 @@ export function Dashboard() {
   const validationActive = useRef(false);
   const calibrationFrame = useRef<number | null>(null);
   const mounted = useRef(true);
+  const trackingStatusPending = useRef<Partial<RuntimeStatus>>({});
+  const trackingStatusTimer = useRef<number | null>(null);
+  const trackingStatusLastSent = useRef(0);
+  const pointerLastSent = useRef<{ x: number; y: number; confidence: number; gesture?: string; at: number } | null>(null);
+  const pointerMessageCount = useRef(0);
+  const pointerMessageWindow = useRef(performance.now());
+
+  function flushTrackingStatus(): void {
+    trackingStatusTimer.current = null;
+    const partial = trackingStatusPending.current;
+    trackingStatusPending.current = {};
+    const now = Date.now();
+    const video = videoRef.current;
+    const stream = trackerRef.current?.camera.currentStream;
+    const cameraFrame = settingsRef.current.touchViewEnabled && !settingsRef.current.touchViewPaused
+      ? cameraThumbnail.current.frame(video)
+      : undefined;
+    const elapsed = Math.max(0.001, (performance.now() - pointerMessageWindow.current) / 1000);
+    const perfSnapshot = partial.performance
+      ? { ...partial.performance, messageSendRate: pointerMessageCount.current / elapsed }
+      : undefined;
+    pointerMessageCount.current = 0;
+    pointerMessageWindow.current = performance.now();
+    const status: Extract<HandFreeMessage, { type: 'TRACKING_STATUS' }>['status'] = {
+      engineState: partial.engineState,
+      pointerSource: partial.pointerSource,
+      trackingPhase: partial.trackingPhase,
+      faceDetected: partial.faceDetected,
+      confidence: partial.confidence,
+      error: partial.error,
+      diagnostic: partial.diagnostic,
+      handTracking: partial.handTracking,
+      handConfidence: partial.handConfidence,
+      cameraOwner: 'dashboard',
+      trackingOwner: 'dashboard',
+      cameraDeviceId: trackerRef.current?.camera.currentDeviceId,
+      cameraVideoWidth: video?.videoWidth || undefined,
+      cameraVideoHeight: video?.videoHeight || undefined,
+      cameraTrackCount: stream?.getTracks().length ?? 0,
+      lastTrackingUpdate: now,
+      ...(perfSnapshot ? { performance: perfSnapshot } : {}),
+      ...(cameraFrame ? { cameraFrame } : {})
+    };
+    trackingStatusLastSent.current = now;
+    setStatus(current => ({ ...current, ...status }));
+    void sendMessage({ type: 'TRACKING_STATUS', status });
+  }
+
+  function queueTrackingStatus(partial: Partial<RuntimeStatus>): void {
+    trackingStatusPending.current = { ...trackingStatusPending.current, ...partial };
+    const elapsed = Date.now() - trackingStatusLastSent.current;
+    if (trackingStatusTimer.current !== null) return;
+    const delay = Math.max(0, 125 - elapsed);
+    trackingStatusTimer.current = window.setTimeout(flushTrackingStatus, delay);
+  }
+
+  function sendPointerUpdate(position: PointerPosition | HandPointerPosition, gesture?: Parameters<TrackingCallbacks['onHand']>[1]): void {
+    const now = performance.now();
+    const previous = pointerLastSent.current;
+    const unchanged = previous
+      && previous.gesture === gesture
+      && Math.abs(previous.x - position.x) < 0.002
+      && Math.abs(previous.y - position.y) < 0.002
+      && Math.abs(previous.confidence - position.confidence) < 0.01;
+    if (unchanged && now - previous.at < 250) return;
+    pointerLastSent.current = { x: position.x, y: position.y, confidence: position.confidence, gesture, at: now };
+    pointerMessageCount.current += 1;
+    void sendMessage({ type: 'POINTER_UPDATE', position, ...(gesture ? { gesture } : {}) });
+  }
 
   function geometryForVideo(video: HTMLVideoElement): CalibrationGeometry {
     const calibrationWorkspace = calibrationStepRef.current !== 'idle' && calibrationStepRef.current !== 'complete';
@@ -95,7 +164,7 @@ export function Dashboard() {
 
   const callbacks = useMemo<TrackingCallbacks>(() => ({
     onStatus: (partial) => {
-      setStatus((current) => ({ ...current, ...partial }));
+      queueTrackingStatus(partial);
       if (calibrationStepRef.current === 'test' && pendingCalibration.current) {
         const sourceMissing = calibrationSource.current === 'hand'
           ? partial.handTracking === 'lost'
@@ -113,30 +182,6 @@ export function Dashboard() {
       }
       if (!cameraOwnership.current.owned) return;
       if (partial.permission) void sendMessage({ type: 'PERMISSION_STATUS', permission: partial.permission, error: partial.error });
-      const video = videoRef.current;
-      const stream = trackerRef.current?.camera.currentStream;
-      const cameraFrame = settingsRef.current.touchViewEnabled && !settingsRef.current.touchViewPaused
-        ? cameraThumbnail.current.frame(video)
-        : undefined;
-      void sendMessage({ type: 'TRACKING_STATUS', status: {
-        engineState: partial.engineState,
-        pointerSource: partial.pointerSource,
-        trackingPhase: partial.trackingPhase,
-        faceDetected: partial.faceDetected,
-        confidence: partial.confidence,
-        error: partial.error,
-        diagnostic: partial.diagnostic,
-        handTracking: partial.handTracking,
-        handConfidence: partial.handConfidence,
-        cameraOwner: 'dashboard',
-        trackingOwner: 'dashboard',
-        cameraDeviceId: trackerRef.current?.camera.currentDeviceId,
-        cameraVideoWidth: video?.videoWidth || undefined,
-        cameraVideoHeight: video?.videoHeight || undefined,
-        cameraTrackCount: stream?.getTracks().length ?? 0,
-        lastTrackingUpdate: Date.now(),
-        ...(cameraFrame ? { cameraFrame } : {})
-      } });
       if (partial.trackingPhase === 'lost' && !settingsRef.current.enabledModes.includes('hand') && !lossPauseSent.current) {
         lossPauseSent.current = true;
         setNotice('Tracking lost. Interaction is paused until your face is detected and stabilized again.');
@@ -158,8 +203,7 @@ export function Dashboard() {
         return;
       }
       if (!settingsRef.current.enabledModes.includes('hand')) {
-        const cameraFrame = settingsRef.current.touchViewEnabled && !settingsRef.current.touchViewPaused ? cameraThumbnail.current.frame(videoRef.current) : undefined;
-        void sendMessage({ type: 'POINTER_UPDATE', position, ...(cameraFrame ? { cameraFrame } : {}) });
+        sendPointerUpdate(position);
       }
     },
     onPosition: () => undefined,
@@ -199,8 +243,7 @@ export function Dashboard() {
         return;
       }
       if (settingsRef.current.enabledModes.includes('hand')) {
-        const cameraFrame = settingsRef.current.touchViewEnabled && !settingsRef.current.touchViewPaused ? cameraThumbnail.current.frame(videoRef.current) : undefined;
-        void sendMessage({ type: 'POINTER_UPDATE', position, gesture, ...(cameraFrame ? { cameraFrame } : {}) });
+        sendPointerUpdate(position, gesture);
       }
     },
     onLandmarks: (frame) => drawTrackingOverlay(overlayRef.current, { ...frame, faceOpacity: settingsRef.current.touchViewFaceOpacity, handOpacity: settingsRef.current.touchViewHandOpacity, geometry: videoRef.current ? geometryForVideo(videoRef.current) : undefined, mirrored: settingsRef.current.mirrorCamera })
@@ -257,6 +300,7 @@ export function Dashboard() {
   useEffect(() => () => {
     mounted.current = false;
     invalidateValidation();
+    if (trackingStatusTimer.current !== null) window.clearTimeout(trackingStatusTimer.current);
   }, []);
 
   useEffect(() => {

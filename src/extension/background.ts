@@ -11,6 +11,7 @@ const CONTROL_TAB_KEY = 'handfree-control-tab-id';
 const TOUCHVIEW_TABS_KEY = 'handfree-touchview-tab-ids';
 const touchViewTabs = new Set<number>();
 const unsupportedMessage = 'TouchView cannot control this page because the browser does not allow extensions to inject interaction controls here.';
+let lastTrackingForwardAt = 0;
 
 function isHandFreeNewTabUrl(url = ''): boolean {
   return url.split(/[?#]/)[0] === chrome.runtime.getURL('newtab.html');
@@ -429,7 +430,7 @@ async function handleMessage(message: HandFreeMessage, sender: chrome.runtime.Me
     case 'POINTER_UPDATE': {
       const [browserActive] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
       if (isHandFreeNewTabUrl(browserActive?.url)) {
-        await chrome.runtime.sendMessage({ type: 'NEW_TAB_POINTER_UPDATE', position: message.position, gesture: message.gesture, cameraFrame: message.cameraFrame }).catch(() => undefined);
+        await chrome.runtime.sendMessage({ type: 'NEW_TAB_POINTER_UPDATE', position: message.position, gesture: message.gesture }).catch(() => undefined);
         return undefined;
       }
       const tab = await activeTab();
@@ -492,11 +493,22 @@ async function handleMessage(message: HandFreeMessage, sender: chrome.runtime.Me
     case 'TRACKING_STATUS': {
       const handLost = message.status.handTracking === 'lost' && status.handTracking !== 'lost';
       const trackingLost = message.status.trackingPhase === 'lost' && status.trackingPhase !== 'lost';
-      status = { ...status, ...message.status, error: message.status.error ?? status.error, diagnostic: message.status.diagnostic ?? status.diagnostic };
-      await chrome.runtime.sendMessage({ type: 'NEW_TAB_CAMERA_FRAME', frame: message.status.cameraFrame, status: message.status }).catch(() => undefined);
+      const { cameraFrame, ...trackingStatus } = message.status;
+      status = { ...status, ...trackingStatus, error: trackingStatus.error ?? status.error, diagnostic: trackingStatus.diagnostic ?? status.diagnostic };
+      const now = Date.now();
+      const urgent = handLost || trackingLost || trackingStatus.trackingPhase === 'error' || Boolean(trackingStatus.diagnostic);
+      // Pointer messages stay frame-rate and payload-light. Status and the
+      // optional JPEG preview are a separate low-rate bridge for the New Tab.
+      if (urgent || cameraFrame || now - lastTrackingForwardAt >= 125) {
+        lastTrackingForwardAt = now;
+        await chrome.runtime.sendMessage({ type: 'NEW_TAB_CAMERA_FRAME', ...(cameraFrame ? { frame: cameraFrame } : {}), status: trackingStatus }).catch(() => undefined);
+      }
       if (!message.status.diagnostic && !message.status.error) await clearRecoveredCalibrationDiagnostic();
       // Cancel pending holds before waiting for analytics persistence.
-      for (const tabId of touchViewTabs) await sendToTab(message, tabId);
+      if (urgent || now - lastTrackingForwardAt < 20) {
+        const overlayStatus = cameraFrame ? { ...trackingStatus, cameraFrame } : trackingStatus;
+        for (const tabId of touchViewTabs) await sendToTab({ type: 'TRACKING_STATUS', status: overlayStatus }, tabId);
+      }
       if (settings.analyticsEnabled && settings.touchViewEnabled && (handLost || trackingLost)) {
         await recordAnalytics({ type: 'tracking-lost', timestamp: Date.now(), mode: 'touchview', outcome: 'lost' });
         if (handLost) await recordAnalytics({ type: 'TOUCHVIEW_HAND_LOST', timestamp: Date.now(), mode: 'touchview', outcome: 'lost' });

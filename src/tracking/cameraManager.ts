@@ -31,7 +31,14 @@ export class CameraManager {
     this.state = 'requesting';
     this.deviceId = deviceId;
     try {
-      this.stream = await navigator.mediaDevices.getUserMedia({ video: deviceId ? { deviceId: { exact: deviceId } } : { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false });
+      // 640x360 keeps the preview responsive while leaving headroom for two
+      // MediaPipe VIDEO inferences and pointer delivery on ordinary laptops.
+      // The browser may still choose a higher native mode for a selected
+      // device; diagnostics report the actual track dimensions.
+      const videoConstraints = deviceId
+        ? { deviceId: { exact: deviceId }, width: { ideal: 640 }, height: { ideal: 360 }, frameRate: { ideal: 24, max: 30 } }
+        : { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 360 }, frameRate: { ideal: 24, max: 30 } };
+      this.stream = await navigator.mediaDevices.getUserMedia({ video: videoConstraints, audio: false });
       this.deviceId = this.stream.getVideoTracks()[0]?.getSettings().deviceId ?? deviceId;
       video.srcObject = this.stream;
       video.muted = true;

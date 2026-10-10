@@ -1,4 +1,4 @@
-import type { HandFreeSettings, HandGesture, PointerPosition, HandPointerPosition, RuntimeStatus } from '../shared/types';
+import type { HandFreeSettings, HandGesture, PointerPosition, HandPointerPosition, RuntimeStatus, TargetInfo } from '../shared/types';
 import { sendMessage } from '../shared/runtime';
 import { findTargetAt } from './targetDetector';
 import { TouchViewGestureMachine } from '../touchview/touchViewGesture';
@@ -15,6 +15,9 @@ export class TouchViewOverlay {
   private paused = false;
   private source = '';
   private anchor = { x: 0, y: 0 };
+  private lastTargetPoint = { x: -Infinity, y: -Infinity };
+  private cachedTarget: { element: HTMLElement; info: TargetInfo } | null = null;
+  private hasCachedTarget = false;
   private watchdog: number;
   constructor(private settings: HandFreeSettings) {
     this.machine = new TouchViewGestureMachine(settings.touchViewHoldDuration, settings.cooldownDuration, settings.touchViewStableHoldEnabled);
@@ -24,8 +27,8 @@ export class TouchViewOverlay {
       :host{all:initial;position:fixed;inset:0;z-index:2147483647;pointer-events:none;color:#fff;font:14px/1.4 system-ui}
       *{box-sizing:border-box}.bar{position:fixed;top:12px;left:12px;display:flex;gap:8px;align-items:center;pointer-events:auto;background:#10151f;padding:8px;border-radius:8px}
       button{background:#151d2b;color:#fff;border:1px solid #65baff;border-radius:5px;min-height:44px;padding:8px 12px;font:inherit;cursor:pointer}button:focus-visible,input:focus-visible{outline:3px solid #fff;outline-offset:3px}#exit{border-color:#ff8585}
-      .cursor{position:fixed;width:28px;height:28px;border:3px solid #42c8ff;border-radius:50%;background:#06233788;transform:translate(-50%,-50%);display:none}
-      .outline{position:fixed;border:3px solid #42c8ff;border-radius:4px;display:none}.label{position:fixed;background:#10151f;padding:6px 10px;border-radius:5px;max-width:320px;display:none}
+      .cursor{position:fixed;width:28px;height:28px;border:3px solid #42c8ff;border-radius:50%;background:#06233788;transform:translate3d(-50%,-50%,0);will-change:transform;display:none}
+      .outline{position:fixed;border:3px solid #42c8ff;border-radius:4px;display:none;will-change:transform}.label{position:fixed;background:#10151f;padding:6px 10px;border-radius:5px;max-width:320px;display:none;will-change:transform}
       .progress{height:5px;background:#354155;margin-top:5px}.progress i{display:block;background:#72e9b2;height:100%;width:0}
       .drawer{position:fixed;top:84px;left:12px;width:300px;max-height:calc(100vh - 100px);overflow:auto;pointer-events:auto;background:#10151f;border:1px solid #65baff;border-radius:8px;padding:16px}.drawer[hidden]{display:none}label{display:block;margin:12px 0}input[type=range]{width:100%;accent-color:#42c8ff}a{color:#86ceff}.veil{position:fixed;inset:0;background:#000;pointer-events:none}.camera{position:fixed;right:16px;bottom:16px;width:240px;max-width:25vw;border-radius:8px;display:none;pointer-events:none}
     </style><div class="veil"></div><img class="camera" alt="Live camera preview"><div class="outline"></div><div class="cursor" aria-hidden="true"></div><div class="label"><span></span><div class="progress"><i></i></div></div>
@@ -72,7 +75,7 @@ export class TouchViewOverlay {
   cancel(reason: string): void {
     const result = this.machine.update({ targetKey: null, gesture: 'pinch', confidence: 0, now: performance.now() });
     if (result.events.some(event => event.type === 'hold-cancelled')) this.cancelled();
-    this.target = null; this.el('.outline').style.display = this.el('.label').style.display = 'none'; this.el('.progress i').style.width = '0'; this.el('#status').textContent = reason;
+    this.target = null; this.cachedTarget = null; this.hasCachedTarget = false; this.lastTargetPoint = { x: -Infinity, y: -Infinity }; this.el('.outline').style.display = this.el('.label').style.display = 'none'; this.el('.progress i').style.width = '0'; this.el('#status').textContent = reason;
   }
   private cancelled(): void { void sendMessage({ type: 'ANALYTICS_EVENT', event: { type: 'TOUCHVIEW_HOLD_CANCELLED', mode: 'touchview', timestamp: Date.now(), outcome: 'cancelled' } }); }
   private onViewport = (): void => this.cancel('Viewport changed — reacquiring target');
@@ -80,7 +83,7 @@ export class TouchViewOverlay {
     const hand = this.settings.enabledModes.includes('hand');
     if (hand ? status.handTracking === 'lost' : status.trackingPhase === 'lost' || status.trackingPhase === 'face-not-detected' || status.trackingPhase === 'reinitializing') this.cancel('Tracking lost — activation cancelled');
   }
-  cameraFrame(frame?: string): void { if (frame?.startsWith('data:image/jpeg;base64,')) { const image = this.el<HTMLImageElement>('.camera'); image.src = frame; image.style.display = 'block'; } }
+  cameraFrame(frame?: string): void { if (frame?.startsWith('data:image/jpeg;base64,')) { const image = this.el<HTMLImageElement>('.camera'); if (image.src !== frame) image.src = frame; image.style.display = 'block'; } }
   update(position: PointerPosition | HandPointerPosition, gesture: HandGesture = 'release'): void {
     this.lastFrame = performance.now();
     if (this.paused) return;
@@ -92,8 +95,14 @@ export class TouchViewOverlay {
     }
     const x = Math.max(0, Math.min(innerWidth - 1, position.x * innerWidth));
     const y = Math.max(0, Math.min(innerHeight - 1, position.y * innerHeight));
-    const cursor = this.el('.cursor'); cursor.style.display = 'block'; cursor.style.left = `${x}px`; cursor.style.top = `${y}px`;
-    const found = findTargetAt(x, y);
+    const cursor = this.el('.cursor'); cursor.style.display = 'block'; cursor.style.transform = `translate3d(${x}px,${y}px,0) translate3d(-50%,-50%,0)`;
+    const movedEnough = Math.hypot(x - this.lastTargetPoint.x, y - this.lastTargetPoint.y) >= 8;
+    if (!this.hasCachedTarget || movedEnough || !this.cachedTarget?.element.isConnected) {
+      this.cachedTarget = findTargetAt(x, y);
+      this.hasCachedTarget = true;
+      this.lastTargetPoint = { x, y };
+    }
+    const found = this.cachedTarget;
     if (found?.element !== this.target) {
       this.target = found?.element ?? null; this.anchor = { x, y };
       void sendMessage({ type: 'TARGET_UPDATE', target: found?.info ?? null });
@@ -103,14 +112,14 @@ export class TouchViewOverlay {
     if (!found) { this.cancel('Move onto a button, link or field'); return; }
     if (!this.ids.has(found.element)) this.ids.set(found.element, String(++this.nextId));
     const rect = found.element.getBoundingClientRect(); const outline = this.el('.outline');
-    Object.assign(outline.style, { display: 'block', left: `${rect.left}px`, top: `${rect.top}px`, width: `${rect.width}px`, height: `${rect.height}px` });
-    const label = this.el('.label'); Object.assign(label.style, { display: 'block', left: `${Math.min(x + 22, Math.max(0, innerWidth - 320))}px`, top: `${Math.min(y + 22, innerHeight - 70)}px` });
+    Object.assign(outline.style, { display: 'block', left: '0px', top: '0px', width: `${rect.width}px`, height: `${rect.height}px`, transform: `translate3d(${rect.left}px,${rect.top}px,0)` });
+    const label = this.el('.label'); Object.assign(label.style, { display: 'block', left: '0px', top: '0px', transform: `translate3d(${Math.min(x + 22, Math.max(0, innerWidth - 320))}px,${Math.min(y + 22, innerHeight - 70)}px,0)` });
     this.el('.label span').textContent = found.info.accessibleName;
     const result = this.machine.update({ targetKey: this.ids.get(found.element)!, gesture, confidence: position.confidence, now: this.lastFrame });
     if (result.events.some(event => event.type === 'hold-cancelled')) this.cancelled();
     this.el('.progress i').style.width = `${this.machine.progress(this.lastFrame) * 100}%`;
     this.el('#status').textContent = this.machine.state === 'RELEASE_WAIT' ? 'Release pinch before next click' : 'Tracking active';
-    if (result.activate && found.element.isConnected && findTargetAt(x, y)?.element === found.element) {
+    if (result.activate && found.element.isConnected && this.cachedTarget?.element === found.element && findTargetAt(x, y)?.element === found.element) {
       found.element.focus({ preventScroll: true }); found.element.click();
       const activation = result.events.find(event => event.type === 'activated');
       void sendMessage({ type: 'ACTIVATION_RESULT', success: true, method: activation?.method, duration: activation?.duration });

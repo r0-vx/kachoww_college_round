@@ -13,7 +13,7 @@ function formatDate(now: Date): string {
   return new Intl.DateTimeFormat(undefined, { weekday: 'long', month: 'long', day: 'numeric' }).format(now);
 }
 
-function cameraLabel(status: RuntimeStatus, localStream: boolean, cameraFrame: string): string {
+function cameraLabel(status: RuntimeStatus, localStream: boolean, cameraFrame: boolean): string {
   if (localStream) return 'Active · New Tab preview';
   if (status.permission === 'active' && status.cameraOwner === 'dashboard') return cameraFrame ? 'Active · Control Center owner' : 'Active · waiting for live frame';
   if (status.permission === 'prompt' || status.engineState === 'STARTING') return 'Starting';
@@ -38,7 +38,9 @@ export function NewTabPage() {
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
   const [status, setStatus] = useState<RuntimeStatus>({ ...DEFAULT_STATUS });
-  const [cameraFrame, setCameraFrame] = useState('');
+  const statusRef = useRef(status);
+  statusRef.current = status;
+  const [hasCameraFrame, setHasCameraFrame] = useState(false);
   const [now, setNow] = useState(() => new Date());
   const [notice, setNotice] = useState('TouchView is ready on this HandFree tab.');
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
@@ -49,9 +51,25 @@ export function NewTabPage() {
   const localStreamRef = useRef<MediaStream | null>(null);
   const releaseCameraLock = useRef<(() => void) | null>(null);
   const lastPointerAt = useRef(0);
+  const cameraFrameRef = useRef('');
+  const webcamBridgeRef = useRef<HTMLImageElement>(null);
+  const lastStatusPaintAt = useRef(0);
 
   function updateStatus(next: Partial<RuntimeStatus>) {
-    setStatus(current => ({ ...current, ...next }));
+    const now = performance.now();
+    const meaningful = next.error || next.diagnostic || (['cameraOwner', 'engineState', 'handTracking', 'trackingPhase'] as const).some(key => next[key] !== undefined && next[key] !== statusRef.current[key]);
+    if (now - lastStatusPaintAt.current < 125 && !meaningful) return;
+    lastStatusPaintAt.current = now;
+    const merged = { ...statusRef.current, ...next };
+    statusRef.current = merged;
+    setStatus(merged);
+  }
+
+  function setCameraFrame(frame: string): void {
+    if (!frame || frame === cameraFrameRef.current) return;
+    cameraFrameRef.current = frame;
+    if (webcamBridgeRef.current) webcamBridgeRef.current.src = frame;
+    if (!hasCameraFrame) setHasCameraFrame(true);
   }
 
   function applySettings(next: HandFreeSettings) {
@@ -94,6 +112,7 @@ export function NewTabPage() {
         if (message.frame) {
           setCameraFrame(message.frame);
           lastPointerAt.current = Date.now();
+          overlayRef.current?.cameraFrame(message.frame);
         }
         if (message.status) updateStatus(message.status);
       }
@@ -107,10 +126,7 @@ export function NewTabPage() {
         overlayRef.current?.trackingStatus(trackingStatus);
       }
       if (message.type === 'NEW_TAB_POINTER_UPDATE' && settingsRef.current.touchViewEnabled) {
-        if (message.cameraFrame) setCameraFrame(message.cameraFrame);
         lastPointerAt.current = Date.now();
-        updateStatus({ lastTrackingUpdate: Date.now() });
-        overlayRef.current?.cameraFrame(message.cameraFrame);
         overlayRef.current?.update(message.position, message.gesture);
       }
       if (message.type === 'CALIBRATION_UPDATED') {
@@ -158,7 +174,7 @@ export function NewTabPage() {
         return;
       }
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false });
+        const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 360 }, frameRate: { ideal: 24, max: 30 } }, audio: false });
         const video = videoRef.current;
         if (!video) throw new Error('New Tab video element is unavailable.');
         video.srcObject = stream;
@@ -218,13 +234,13 @@ export function NewTabPage() {
 
   const enabled = settings.touchViewEnabled;
   const paused = settings.touchViewPaused || settings.paused;
-  const cameraState = cameraLabel(status, Boolean(localStream), cameraFrame);
+  const cameraState = cameraLabel(status, Boolean(localStream), hasCameraFrame);
   const trackingState = trackingLabel(status, lastPointerAt.current);
   const diagnosticText = status.diagnostic ? `${status.diagnostic.title}: ${status.diagnostic.explanation} ${status.diagnostic.recovery}` : '';
 
   return <main className="newtab-page">
     <video ref={videoRef} className="newtab-webcam-video" autoPlay muted playsInline aria-label="Live webcam background" style={{ opacity: localStream ? settings.touchViewCameraOpacity : 0 }} onLoadedMetadata={() => { setVideoReady(true); setVideoMetrics(current => ({ ...current, readyState: videoRef.current?.readyState ?? 0, width: videoRef.current?.videoWidth ?? 0, height: videoRef.current?.videoHeight ?? 0 })); }} />
-    {cameraFrame && <img className="newtab-webcam" src={cameraFrame} alt="Live webcam background from Control Center" style={{ opacity: settings.touchViewCameraOpacity }} />}
+    <img ref={webcamBridgeRef} className="newtab-webcam" alt="Live webcam background from Control Center" style={{ opacity: settings.touchViewCameraOpacity, display: hasCameraFrame ? 'block' : 'none' }} />
     <div className="newtab-scrim" aria-hidden="true" style={{ opacity: settings.touchViewScrimOpacity }} />
     <section className="newtab-interface" style={{ opacity: settings.touchViewWebsiteOpacity }}>
       <header className="newtab-header"><div className="newtab-brand"><span className="newtab-logo" aria-hidden="true">+</span><div><strong>HandFree</strong><span>Accessible browser home</span></div></div><div className="newtab-clock"><strong>{formatTime(now)}</strong><span>{formatDate(now)}</span></div></header>
@@ -234,7 +250,7 @@ export function NewTabPage() {
       <section className="newtab-grid" aria-label="HandFree quick links"><article className="newtab-card"><span className="newtab-card-label">TouchView</span><h2>{enabled ? paused ? 'Paused' : 'Ready to point' : 'Off'}</h2><p>{enabled ? 'The overlay is available on this replacement New Tab page.' : 'Enable it here or open the Control Center to start the camera.'}</p><div className="newtab-actions"><button className="newtab-button newtab-button--primary" onClick={enabled ? togglePause : enableTouchView}>{enabled ? paused ? 'Resume TouchView' : 'Pause TouchView' : 'Enable TouchView'}</button><button className="newtab-button" onClick={() => void openControlCenter(!enabled)}>{enabled ? 'Open Control Center' : 'Start camera setup'}</button>{enabled && <button className="newtab-button newtab-button--danger" onClick={() => void stopCamera()}>Stop camera</button>}</div></article><article className="newtab-card"><span className="newtab-card-label">Calibration</span><h2>{settings.calibration ? `${Math.round(settings.calibration.quality * 100)}% mapped` : 'Not calibrated'}</h2><p>{settings.calibration ? settings.calibration.qualityStatus === 'estimated' ? 'Four-point map saved; optional validation is available.' : 'Shared calibration is ready across supported pages.' : 'Calibrate once in the Control Center and reuse it everywhere.'}</p><button className="newtab-link-button" onClick={() => void openControlCenter()}>Open calibration <span aria-hidden="true">→</span></button></article></section>
       <nav className="newtab-links" aria-label="Useful links"><a href="https://example.com">Example Domain</a><a href="https://www.wikipedia.org">Wikipedia</a><a href="https://github.com">GitHub</a><a href={chrome.runtime.getURL('demo.html')}>Demo Lab</a></nav>
       {notice && <p className="newtab-notice" role="status">{notice}</p>}
-      <details className="newtab-debug"><summary>Connection diagnostics</summary><dl><dt>Video element</dt><dd>{videoReady ? 'ready' : 'present · waiting for metadata'}</dd><dt>Video source</dt><dd>{localStream ? 'MediaStream attached' : cameraFrame ? 'Control Center live frame bridge' : 'not connected'}</dd><dt>Video dimensions</dt><dd>{videoMetrics.width} × {videoMetrics.height}</dd><dt>Video ready state</dt><dd>{videoMetrics.readyState}</dd><dt>Camera tracks</dt><dd>{localStream ? videoMetrics.tracks : status.cameraTrackCount ?? 0}</dd><dt>Camera owner</dt><dd>{status.cameraOwner}</dd><dt>Tracking owner</dt><dd>{status.trackingOwner}</dd><dt>Last tracking update</dt><dd>{lastPointerAt.current ? new Date(lastPointerAt.current).toLocaleTimeString() : 'none'}</dd></dl></details>
+      <details className="newtab-debug"><summary>Connection diagnostics</summary><dl><dt>Video element</dt><dd>{videoReady ? 'ready' : 'present · waiting for metadata'}</dd><dt>Video source</dt><dd>{localStream ? 'MediaStream attached' : hasCameraFrame ? 'Control Center live frame bridge' : 'not connected'}</dd><dt>Video dimensions</dt><dd>{videoMetrics.width} × {videoMetrics.height}</dd><dt>Video ready state</dt><dd>{videoMetrics.readyState}</dd><dt>Camera tracks</dt><dd>{localStream ? videoMetrics.tracks : status.cameraTrackCount ?? 0}</dd><dt>Camera owner</dt><dd>{status.cameraOwner}</dd><dt>Tracking owner</dt><dd>{status.trackingOwner}</dd><dt>Last tracking update</dt><dd>{lastPointerAt.current ? new Date(lastPointerAt.current).toLocaleTimeString() : 'none'}</dd>{status.performance && <><dt>Video FPS</dt><dd>{status.performance.videoFps.toFixed(1)}</dd><dt>Face inference FPS</dt><dd>{status.performance.faceInferenceFps.toFixed(1)} · {status.performance.faceInferenceMs.toFixed(1)} ms</dd><dt>Hand inference FPS</dt><dd>{status.performance.handInferenceFps.toFixed(1)} · {status.performance.handInferenceMs.toFixed(1)} ms</dd><dt>Pointer FPS</dt><dd>{status.performance.pointerFps.toFixed(1)}</dd><dt>Render FPS</dt><dd>{status.performance.renderFps.toFixed(1)}</dd><dt>Active animation loops</dt><dd>{status.performance.activeAnimationLoops}</dd><dt>Average inference</dt><dd>{status.performance.averageInferenceMs.toFixed(1)} ms</dd><dt>Active camera streams</dt><dd>{status.performance.activeCameraStreams}</dd><dt>Active tracking loops</dt><dd>{status.performance.activeTrackingLoops}</dd><dt>Active MediaPipe loops</dt><dd>{status.performance.activeMediaPipeLoops}</dd><dt>Dropped frames</dt><dd>{status.performance.droppedFrames}</dd><dt>Message rate</dt><dd>{status.performance.messageSendRate.toFixed(1)}/s</dd><dt>Main-thread block</dt><dd>{status.performance.mainThreadBlockingMs.toFixed(1)} ms</dd></>}</dl></details>
     </section>
     <footer className="newtab-footer"><span>Camera opacity {Math.round(settings.touchViewCameraOpacity * 100)}%</span><span>Webpage opacity {Math.round(settings.touchViewWebsiteOpacity * 100)}%</span><button onClick={() => void openControlCenter()}>Settings</button></footer>
   </main>;
