@@ -1,0 +1,32 @@
+{
+  "manifest_version": 3,
+  "name": "HandFree",
+  "version": "0.1.0",
+  "description": "Accessible webpage interaction using head movement, with an in-page pointer only.",
+  "action": {
+    "default_title": "Open HandFree Control Center",
+    "default_popup": "dashboard.html"
+  },
+  "background": {
+    "service_worker": "assets/background.js",
+    "type": "module"
+  },
+  "permissions": ["storage", "tabs", "sidePanel"],
+  "host_permissions": ["<all_urls>"],
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["assets/content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["assets/*"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}

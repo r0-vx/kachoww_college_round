@@ -1,0 +1,5 @@
+node_modules/
+.playwright-cli/
+.browser-profile-test/
+.vite/
+*.log
