@@ -133,7 +133,31 @@ try {
   check('New Tab keeps opacity controls independent', await newtab.locator('.newtab-interface').evaluate(el => el.style.opacity) === '0.5' && await newtab.locator('.newtab-scrim').evaluate(el => el.style.opacity) === '0.2' && await newtab.locator('#handfree-touchview-root .bar').evaluate(el => getComputedStyle(el).opacity) === '1');
   await newtab.reload(); await newtab.locator('#handfree-touchview-root').waitFor();
   check('New Tab reload reconnects TouchView', true);
-  const blocked = await browser.newPage(); await blocked.goto(`chrome-extension://${id}/demo.html`);
+  const blocked = await browser.newPage();
+  await blocked.addInitScript(() => {
+    class MockSpeechRecognition {
+      static instances = [];
+      continuous = false;
+      interimResults = false;
+      lang = 'en-US';
+      onresult = null;
+      onend = null;
+      onerror = null;
+      constructor() { MockSpeechRecognition.instances.push(this); }
+      start() {}
+      stop() { this.onend?.(); }
+      abort() { this.onend?.(); }
+      emit(text, isFinal = true) {
+        const result = { 0: { transcript: text }, length: 1, isFinal };
+        this.onresult?.({ resultIndex: 0, results: [result] });
+      }
+      emitError(error = 'not-allowed') { this.onerror?.({ error }); }
+    }
+    window.SpeechRecognition = MockSpeechRecognition;
+    window.__handfreeEmitSpeech = (text, isFinal = true) => MockSpeechRecognition.instances.at(-1)?.emit(text, isFinal);
+    window.__handfreeEmitSpeechError = (error = 'not-allowed') => MockSpeechRecognition.instances.at(-1)?.emitError(error);
+  });
+  await blocked.goto(`chrome-extension://${id}/demo.html`);
   await blocked.getByText('HandFree Demo').waitFor();
   check('Demo Lab opens as a standalone live workspace', new URL(blocked.url()).pathname.endsWith('/demo.html') && await blocked.getByText('HandFree Demo').count() === 1);
   check('Demo Lab owns a real webcam video surface', await blocked.locator('video.demo-camera').evaluate(video => video.autoplay && video.muted && video.playsInline && video.clientWidth > 0 && video.clientHeight > 0));
@@ -151,7 +175,39 @@ try {
   await blocked.locator('#demo-radio-pause').check();
   await blocked.locator('#demo-slider').fill('82');
   await blocked.locator('#demo-submit').click();
-  check('Demo form controls and local submit work', (await blocked.locator('#demo-result').innerText()).includes('Demo user'));
+  check('Demo form controls and local submit work', (await blocked.locator('#demo-result').innerText()).includes('Message sent.') && await blocked.locator('.demo-conversation-item').count() === 1);
+  check('Demo microphone sits beside the editable message field', await blocked.locator('#demo-note').count() === 1 && await blocked.locator('#demo-microphone').count() === 1 && await blocked.locator('#demo-submit').count() === 1);
+  await blocked.locator('#demo-note').fill('A dictated message.');
+  await blocked.locator('#demo-microphone').click();
+  check('Demo microphone enters a visible listening state', await blocked.locator('#demo-microphone').getAttribute('aria-pressed') === 'true' && (await blocked.locator('#demo-voice-status').innerText()).includes('Listening'));
+  await blocked.evaluate(() => window.__handfreeEmitSpeech('Voice captured sentence.'));
+  await blocked.waitForFunction(() => document.querySelector('#demo-note')?.value === 'Voice captured sentence.');
+  check('Demo speech transcript enters the editable field', await blocked.locator('#demo-note').inputValue() === 'Voice captured sentence.' && (await blocked.locator('#demo-voice-status').innerText()).includes('captured'));
+  await blocked.locator('#demo-note').fill('Edited voice message.');
+  await blocked.locator('#demo-submit').click();
+  check('Edited voice text sends through the normal submit path', await blocked.locator('.demo-conversation-item').count() === 2 && (await blocked.locator('#demo-result').innerText()).includes('Message sent.'));
+  await blocked.locator('#demo-note').fill('Second voice message.');
+  await blocked.locator('#demo-microphone').click();
+  await blocked.evaluate(() => window.__handfreeEmitSpeech('Send above msg.'));
+  await blocked.waitForFunction(() => document.querySelector('#demo-note')?.value === '');
+  check('Voice send phrase submits and clears the field', await blocked.locator('.demo-conversation-item').count() === 3 && await blocked.locator('#demo-note').inputValue() === '');
+  await blocked.locator('#demo-note').fill('Clear this message.');
+  await blocked.locator('#demo-microphone').click();
+  await blocked.evaluate(() => window.__handfreeEmitSpeech('Clear message.'));
+  await blocked.waitForFunction(() => document.querySelector('#demo-note')?.value === '');
+  check('Voice clear phrase clears without creating a message', await blocked.locator('.demo-conversation-item').count() === 3 && await blocked.locator('#demo-note').inputValue() === '');
+  await blocked.locator('#demo-microphone').click();
+  check('Microphone starts a fresh listening session', await blocked.locator('#demo-microphone').getAttribute('aria-pressed') === 'true');
+  await blocked.locator('#demo-microphone').click();
+  check('Second microphone click stops listening', await blocked.locator('#demo-microphone').getAttribute('aria-pressed') === 'false');
+  await blocked.locator('#demo-microphone').click();
+  check('Microphone can restart after stopping', await blocked.locator('#demo-microphone').getAttribute('aria-pressed') === 'true');
+  await blocked.evaluate(() => window.__handfreeEmitSpeechError('not-allowed'));
+  await blocked.getByRole('alert').waitFor();
+  check('Voice permission errors are readable and contained', (await blocked.getByRole('alert').innerText()).includes('VOICE_RECOGNITION_UNAVAILABLE'));
+  await blocked.locator('#demo-note').fill('Keyboard submit message.');
+  await blocked.locator('#demo-note').press('Control+Enter');
+  check('Ctrl plus Enter submits the editable composer', await blocked.locator('.demo-conversation-item').count() === 4 && await blocked.locator('#demo-note').inputValue() === '');
   check('Demo Lab includes the real Sense demonstration webpage', await blocked.locator('#sense-demo-page').count() === 1 && await blocked.locator('#sense-demo-page').getByText('Build an accessible study plan').count() === 1 && await blocked.locator('#sense-application').count() === 1);
   check('Sense exposes local page actions', await blocked.locator('#sense-read-page').count() === 1 && await blocked.locator('#sense-read-headings').count() === 1 && await blocked.locator('#sense-find-links').count() === 1 && await blocked.locator('#sense-find-deadlines').count() === 1 && await blocked.locator('#sense-summarize').count() === 1 && await blocked.locator('#sense-stop-reading').count() === 1);
   await blocked.locator('#sense-read-page').click();
@@ -194,6 +250,7 @@ try {
   check('narrow side panel has no horizontal overflow', await side.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
   await mkdir('output', { recursive: true });
   await dashboard.screenshot({ path: 'output/dashboard-smoke.png', fullPage: true });
+  await blocked.screenshot({ path: 'output/demo-smoke.png', fullPage: true });
   await second.screenshot({ path: 'output/overlay-smoke.png', fullPage: true });
   await side.screenshot({ path: 'output/sidepanel-smoke.png', fullPage: true });
   check('no page runtime exceptions', errors.length === 0);

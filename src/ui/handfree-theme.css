@@ -38,9 +38,10 @@
 }
 
 .app-shell .topbar {
-  background: var(--hf-ink);
-  border-bottom-color: rgba(255, 255, 255, .14);
-  color: #f8fbf4;
+  background: #f9f9f6;
+  border: 1px solid #dfe0d9;
+  border-bottom-color: #dfe0d9;
+  color: var(--hf-ink);
 }
 
 .app-shell .brand-mark {
@@ -114,11 +115,22 @@
 }
 
 .app-shell .card--accent .button,
-.app-shell .touchview-dashboard-card .button,
-.app-shell .topbar .topbar-action {
+.app-shell .touchview-dashboard-card .button {
   border-color: rgba(255, 255, 255, .24);
   background: rgba(255, 255, 255, .08);
   color: #f5f9ef;
+}
+
+.app-shell .topbar .topbar-action {
+  border-color: #dedfd8;
+  background: #fff;
+  color: var(--hf-ink);
+}
+
+.app-shell .topbar > .topbar-actions > .topbar-action {
+  border-color: var(--hf-ink);
+  background: var(--hf-ink);
+  color: #fff;
 }
 
 .app-shell .button--primary {

@@ -12,6 +12,7 @@ import { SessionManager } from '../session/sessionManager';
 import { DwellController } from '../content/dwellController';
 import { findTargetAt } from '../content/targetDetector';
 import { mapCameraToViewport, readCalibrationGeometry, type CoordinatePoint } from '../tracking/coordinateMapping';
+import { SpeechController, type SpeechStatus } from '../voice/speechController';
 
 function targetName(target?: TargetInfo | null): string {
   return target?.accessibleName?.trim() || 'Unnamed control';
@@ -35,6 +36,31 @@ interface SenseReport {
 interface SenseResult {
   label: string;
   items: string[];
+}
+
+interface DemoConversationMessage {
+  id: number;
+  text: string;
+  response: string;
+  timestamp: number;
+}
+
+function hasSpeechRecognitionSupport(): boolean {
+  if (typeof window === 'undefined') return false;
+  const speechWindow = window as Window & { SpeechRecognition?: unknown; webkitSpeechRecognition?: unknown };
+  return Boolean(speechWindow.SpeechRecognition || speechWindow.webkitSpeechRecognition);
+}
+
+function normalizeVoicePhrase(value: string): string {
+  return value.trim().toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function isSendVoicePhrase(value: string): boolean {
+  return /^(?:send|send (?:the )?message|send above (?:the )?(?:message|msg)|submit (?:the )?(?:message|msg))$/.test(normalizeVoicePhrase(value));
+}
+
+function isClearVoicePhrase(value: string): boolean {
+  return /^(?:clear|clear (?:the )?(?:message|msg|field))$/.test(normalizeVoicePhrase(value));
 }
 
 function uniqueText(values: string[]): string[] {
@@ -112,6 +138,14 @@ export function DemoLab() {
   const [dwellProgress, setDwellProgress] = useState(0);
   const [handGesture, setHandGesture] = useState<HandGesture>('release');
   const [formResult, setFormResult] = useState('No action yet.');
+  const speechRecognitionSupported = hasSpeechRecognitionSupport();
+  const [composerValue, setComposerValue] = useState('');
+  const composerValueRef = useRef('');
+  const [conversation, setConversation] = useState<DemoConversationMessage[]>([]);
+  const [voiceState, setVoiceState] = useState<SpeechStatus>(() => hasSpeechRecognitionSupport() ? 'idle' : 'unavailable');
+  const [voiceMessage, setVoiceMessage] = useState(() => hasSpeechRecognitionSupport()
+    ? 'Click the microphone to dictate a local message.'
+    : 'Voice recognition is unavailable in this browser. You can still type and send messages.');
   const [senseReport, setSenseReport] = useState<SenseReport | null>(null);
   const [senseResult, setSenseResult] = useState<SenseResult | null>(null);
   const [senseState, setSenseState] = useState<'idle' | 'reading' | 'ready'>('idle');
@@ -124,6 +158,9 @@ export function DemoLab() {
   const targetOutlineRef = useRef<HTMLDivElement>(null);
   const sensePageRef = useRef<HTMLElement>(null);
   const senseUtteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
+  const speechRef = useRef<SpeechController | null>(null);
+  const voiceSessionRef = useRef(0);
+  const conversationIdRef = useRef(0);
   const sharedModesRef = useRef<HandFreeSettings['enabledModes']>(settings.enabledModes);
   const trackerRef = useRef<SessionManager | null>(null);
   const ownershipRef = useRef(new CameraOwnership());
@@ -364,6 +401,122 @@ export function DemoLab() {
     speakSense(result.items.join('. '));
   }
 
+  function updateComposer(value: string): void {
+    composerValueRef.current = value;
+    setComposerValue(value);
+  }
+
+  function submitDemoMessage(raw = composerValueRef.current): boolean {
+    const message = raw.trim();
+    if (!message) {
+      setFormResult('Write or dictate a message before sending.');
+      setFeedback('Add a message before sending.');
+      setVoiceMessage('Write or dictate a message before sending.');
+      return false;
+    }
+    const id = ++conversationIdRef.current;
+    setConversation((current) => [...current, {
+      id,
+      text: message,
+      response: 'Your message was received through HandFree voice input.',
+      timestamp: Date.now()
+    }]);
+    updateComposer('');
+    setFormResult('Message sent.');
+    setFeedback('Message sent. Demo response is local.');
+    setVoiceMessage('Message sent. You can edit and send another message.');
+    return true;
+  }
+
+  function stopVoiceInput(message = 'Voice input stopped.'): void {
+    voiceSessionRef.current += 1;
+    const controller = speechRef.current;
+    speechRef.current = null;
+    controller?.destroy();
+    setVoiceState('idle');
+    setVoiceMessage(message);
+    void sendMessage({ type: 'VOICE_STATUS', voice: 'idle', message });
+  }
+
+  function handleVoiceTranscript(transcript: string, isFinal: boolean): void {
+    if (!isFinal) return;
+    const phrase = normalizeVoicePhrase(transcript);
+    if (!phrase) {
+      stopVoiceInput('No words were captured. Try again when you are ready.');
+      return;
+    }
+    if (isSendVoicePhrase(phrase)) {
+      const sent = submitDemoMessage();
+      stopVoiceInput(sent ? 'Message sent.' : 'Nothing was sent. Add a message first.');
+      return;
+    }
+    if (isClearVoicePhrase(phrase)) {
+      updateComposer('');
+      setFormResult('Message cleared.');
+      setFeedback('Message cleared.');
+      stopVoiceInput('Message cleared.');
+      return;
+    }
+    if (/^stop (?:listening|voice input)$/.test(phrase)) {
+      stopVoiceInput();
+      return;
+    }
+    updateComposer(transcript.trim());
+    setFormResult('Voice text ready to edit.');
+    setFeedback('Voice text captured. Edit it or say “send message”.');
+    stopVoiceInput('Voice text captured. Edit it before sending.');
+  }
+
+  function startVoiceInput(): void {
+    if (voiceState === 'listening' || speechRef.current?.status === 'listening') {
+      stopVoiceInput();
+      return;
+    }
+    if (!speechRecognitionSupported) {
+      setVoiceState('unavailable');
+      setVoiceMessage('Voice recognition is unavailable in this browser. You can still type and send messages.');
+      return;
+    }
+
+    voiceSessionRef.current += 1;
+    const session = voiceSessionRef.current;
+    speechRef.current?.destroy();
+    speechRef.current = null;
+    setVoiceState('processing');
+    setVoiceMessage('Requesting microphone access…');
+
+    const controller = new SpeechController({
+      onTranscript: (text, isFinal) => {
+        if (session !== voiceSessionRef.current) return;
+        handleVoiceTranscript(text, isFinal);
+      },
+      onStatus: (nextStatus, nextMessage) => {
+        if (session !== voiceSessionRef.current) return;
+        setVoiceState(nextStatus);
+        const fallback = nextStatus === 'listening'
+          ? 'Listening…'
+          : nextStatus === 'processing'
+            ? 'Processing voice input…'
+            : nextStatus === 'unavailable'
+              ? 'Voice recognition is unavailable in this browser.'
+              : nextStatus === 'error'
+                ? 'Voice recognition failed. Check microphone permission and retry.'
+                : 'Click the microphone to dictate a local message.';
+        setVoiceMessage(nextMessage || fallback);
+        const runtimeVoice = nextStatus === 'listening'
+          ? 'listening'
+          : nextStatus === 'error'
+            ? 'error'
+            : nextStatus === 'unavailable'
+              ? 'unavailable'
+              : 'idle';
+        void sendMessage({ type: 'VOICE_STATUS', voice: runtimeVoice, message: nextMessage || fallback });
+      }
+    });
+    speechRef.current = controller;
+    controller.start('command');
+  }
+
   useEffect(() => {
     mountedRef.current = true;
     const dwell = new DwellController({
@@ -474,6 +627,9 @@ export function DemoLab() {
       tracker.clearConsumers();
       ownershipRef.current.release();
       dwell.destroy();
+      voiceSessionRef.current += 1;
+      speechRef.current?.destroy();
+      speechRef.current = null;
       if ('speechSynthesis' in window) window.speechSynthesis.cancel();
       senseUtteranceRef.current = null;
       unsubscribeSettings();
@@ -547,12 +703,7 @@ export function DemoLab() {
 
   function handleSubmit(event: FormEvent<HTMLFormElement>): void {
     event.preventDefault();
-    const values = new FormData(event.currentTarget);
-    const externalNameField = document.getElementById('demo-text');
-    const externalName = externalNameField instanceof HTMLInputElement ? externalNameField.value : '';
-    const name = String(values.get('name') || externalName).trim() || 'Guest';
-    setFormResult(`Form submitted locally for ${name}.`);
-    setFeedback('Form submitted locally. No data leaves this demo.');
+    submitDemoMessage();
   }
 
   function handleSenseSubmit(event: FormEvent<HTMLFormElement>): void {
@@ -605,10 +756,20 @@ export function DemoLab() {
 
         <article className="demo-control-card demo-control-card--accent" id="demo-target">
           <div className="demo-card-heading"><div><span className="demo-page-kicker">Safe activation</span><h2>Submit a local test</h2></div><span className="demo-card-index">02</span></div>
-          <p>Use this form to confirm that a real control receives the activation. Nothing is sent to a server.</p>
+          <p>Type or dictate a message, edit it if needed, then send it through this local-only conversation. Nothing is sent to a server.</p>
+          <section className="demo-conversation" aria-labelledby="demo-conversation-title">
+            <div className="demo-conversation-heading"><span id="demo-conversation-title">Local conversation</span><small>{conversation.length ? `${conversation.length} message${conversation.length === 1 ? '' : 's'}` : 'Empty'}</small></div>
+            {conversation.length === 0
+              ? <p className="demo-conversation-empty">No messages yet. Use the microphone or type below.</p>
+              : <ol className="demo-conversation-list">{conversation.map((message) => <li key={message.id} className="demo-conversation-item"><div className="demo-conversation-meta"><strong>You</strong><time dateTime={new Date(message.timestamp).toISOString()}>{new Date(message.timestamp).toLocaleTimeString()}</time></div><p>{message.text}</p><div className="demo-conversation-response"><span>Demo response</span><p>{message.response}</p></div></li>)}</ol>}
+          </section>
           <form id="demo-form" onSubmit={handleSubmit}>
-            <label className="demo-field" htmlFor="demo-note"><span>Message</span><textarea id="demo-note" name="message" rows={4} placeholder="Write a short message" /></label>
-            <button id="demo-submit" type="submit" className="demo-page-button demo-page-button--primary">Submit locally</button>
+            <div className="demo-composer" aria-label="Demo message composer">
+              <label className="demo-field demo-message-field" htmlFor="demo-note"><span>Message</span><textarea id="demo-note" name="message" rows={4} placeholder="Write a short message" value={composerValue} onChange={(event) => updateComposer(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) { event.preventDefault(); submitDemoMessage(); } }} /></label>
+              <button id="demo-microphone" className={`demo-mic-button${voiceState === 'listening' ? ' demo-mic-button--listening' : ''}${voiceState === 'error' || voiceState === 'unavailable' ? ' demo-mic-button--error' : ''}`} type="button" aria-label={voiceState === 'listening' ? 'Stop listening' : 'Use voice input'} title={voiceState === 'listening' ? 'Stop listening' : 'Use voice input'} aria-pressed={voiceState === 'listening'} aria-describedby="demo-voice-status" disabled={!speechRecognitionSupported} onClick={startVoiceInput}><Icon name="mic" /><span>{voiceState === 'listening' ? 'Stop listening' : 'Voice input'}</span></button>
+              <button id="demo-submit" type="submit" className="demo-page-button demo-page-button--primary">Send</button>
+            </div>
+            <p id="demo-voice-status" className={`demo-voice-status${voiceState === 'listening' ? ' demo-voice-status--listening' : ''}${voiceState === 'error' || voiceState === 'unavailable' ? ' demo-voice-status--error' : ''}`} role={voiceState === 'error' || voiceState === 'unavailable' ? 'alert' : 'status'} aria-live="polite"><Icon name={voiceState === 'error' || voiceState === 'unavailable' ? 'warning' : voiceState === 'listening' ? 'mic' : 'info'} />{voiceMessage}</p>
           </form>
           <div id="demo-result" className="demo-result" role="status" aria-live="polite"><span>Result</span><strong>{formResult}</strong></div>
         </article>
