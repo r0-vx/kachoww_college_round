@@ -84,7 +84,7 @@ export function SidePanel() {
     </section>
     {notice && <p className="notice" role="status">{notice}</p>}
     {status.error && <p className="notice" role="alert">{status.error}</p>}
-    <button className="button" style={{ width: '100%' }} onClick={() => void openDashboardInTab()}><Icon name="external" />Camera and calibration</button>
+    <button className="button" style={{ width: '100%' }} onClick={() => void openDashboardInTab(undefined, 'calibration')}><Icon name="target" />Start calibration</button>
     <details className="card compact-card" style={{ marginTop: 16 }}><summary>Diagnostics <span>Tracking and experimental voice status</span></summary><div className="compact-metrics"><div className="compact-metric">Tracking<strong>{status.trackingState}</strong></div><div className="compact-metric">Estimated hand confidence<strong>{formatConfidence(status.handConfidence)}</strong></div><div className="compact-metric">Camera consumers<strong>{status.activeCameraConsumers.length}</strong></div><div className="compact-metric">Microphone<strong>{status.microphone}</strong></div><div className="compact-metric">Voice · experimental<strong>{status.voice}</strong></div></div><p className="privacy-copy">Voice and dictation have not been manually tested.</p></details>
     <p className="privacy-copy">Keep the camera dashboard open while tracking. Use Stop camera there to end capture.</p>
   </main></AppShell>;

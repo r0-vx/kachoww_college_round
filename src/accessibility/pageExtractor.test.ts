@@ -12,4 +12,12 @@ const nodes: PageNode[] = [
 describe('page extraction ranking', () => {
   it('prioritizes main content and headings', () => { expect(rankPageContent(nodes, 'deadline')[0]?.role).toBe('main'); });
   it('answers from supplied page content only', () => { expect(answerPageQuery(nodes, 'important information')).toContain('deadline'); expect(answerPageQuery(nodes, 'buttons')).toContain('Apply now'); });
+  it('focuses Sense answers on the requested semantic section', () => {
+    expect(answerPageQuery([
+      ...nodes,
+      { id: '5', role: 'heading', accessibleName: 'Application deadline', text: 'Application deadline', visible: true, interactive: false, disabled: false, parentSection: 'Application deadline', selectorHint: 'h3' },
+      { id: '6', role: 'p', accessibleName: 'The first-round deadline is 30 November 2026.', text: 'The first-round deadline is 30 November 2026.', visible: true, interactive: false, disabled: false, parentSection: 'Application deadline', selectorHint: 'p' },
+      { id: '7', role: 'li', accessibleName: 'Student identification', text: 'Student identification', visible: true, interactive: false, disabled: false, parentSection: 'Required documents', selectorHint: 'li' },
+    ], 'What is the deadline?')).toContain('30 November 2026');
+  });
 });

@@ -210,7 +210,10 @@ export function Dashboard() {
     },
     onPointer: (position) => {
       if (calibrationStepRef.current !== 'idle' && calibrationStepRef.current !== 'complete') {
-        if (calibrationStepRef.current === 'test' && calibrationSource.current === 'head') validatePoint(position);
+        // Calibration validation is fed by onCoordinate below. The pointer
+        // callback is already relative/smoothed for head control (and may be
+        // sensitivity-adjusted for hand control), so consuming it here would
+        // mix sources or apply the mapping twice.
         return;
       }
       if (!settingsRef.current.enabledModes.includes('hand')) {
@@ -226,7 +229,22 @@ export function Dashboard() {
         setRawCalibrationPoint(sample.point);
         if (videoRef.current) {
           const geometry = geometryForVideo(videoRef.current);
-          setMappingDebug(mapCameraToViewportDebug(sample.point, pendingCalibration.current ?? settingsRef.current.calibration, geometry, settingsRef.current.mirrorCamera));
+          const activeCalibration = pendingCalibration.current ?? settingsRef.current.calibration;
+          const debug = mapCameraToViewportDebug(sample.point, activeCalibration, geometry, settingsRef.current.mirrorCamera);
+          setMappingDebug(debug);
+          if (calibrationStepRef.current === 'test' && pendingCalibration.current) {
+            if (debug.point) {
+              // Validation uses exactly the selected source's raw landmark,
+              // corrected and mapped once. This avoids the old head-relative
+              // pointer and hand-sensitivity paths during calibration.
+              setLiveCalibrationPoint(debug.point);
+              validatePoint({ ...debug.point, confidence: sample.confidence });
+            } else {
+              validationActive.current = false;
+              setValidationState('waiting');
+              setValidationMessage('The selected source cannot be mapped right now. Keep tracking visible and retry.');
+            }
+          }
         }
       }
       if (sample.source === calibrationSource.current && calibrationStepRef.current !== 'idle' && calibrationStepRef.current !== 'test' && calibrationStepRef.current !== 'complete') {
@@ -250,7 +268,8 @@ export function Dashboard() {
     },
     onHand: (position, gesture) => {
       if (calibrationStepRef.current !== 'idle' && calibrationStepRef.current !== 'complete') {
-        if (calibrationStepRef.current === 'test' && calibrationSource.current === 'hand') validatePoint(position);
+        // See onPointer: calibration consumes the raw hand coordinate in
+        // onCoordinate so pinch smoothing/sensitivity cannot distort it.
         return;
       }
       if (settingsRef.current.enabledModes.includes('hand')) {
@@ -295,6 +314,22 @@ export function Dashboard() {
     void sendMessage({ type: 'GET_STATE' }).then((response) => { if (response?.type === 'STATE_RESPONSE') { setSettings(response.settings); setStatus(response.status); } });
     void sendMessage({ type: 'GET_ACTIVE_TAB_STATUS' }).then((response) => { if (response?.type === 'ACTIVE_TAB_STATUS') setStatus((current) => ({ ...current, ...response.status })); });
     return subscribeToSettings(setSettings);
+  }, []);
+
+  useEffect(() => {
+    let timer: number | null = null;
+    const openCalibrationFromHash = () => {
+      if (window.location.hash !== '#calibration') return;
+      window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}`);
+      if (timer !== null) window.clearTimeout(timer);
+      timer = window.setTimeout(() => { timer = null; void startCalibration(); }, 150);
+    };
+    openCalibrationFromHash();
+    window.addEventListener('hashchange', openCalibrationFromHash);
+    return () => {
+      window.removeEventListener('hashchange', openCalibrationFromHash);
+      if (timer !== null) window.clearTimeout(timer);
+    };
   }, []);
 
   useEffect(() => {
@@ -425,12 +460,22 @@ export function Dashboard() {
   function stopCamera() {
     lossPauseSent.current = false;
     if (calibrationStepRef.current !== 'idle' && calibrationStepRef.current !== 'complete') cancelCalibration();
-    if (!cameraOwnership.current.owned && !trackerRef.current?.camera.currentStream) {
-      setNotice('This dashboard has no camera stream. If another dashboard owns capture, use Stop camera there.');
-      return;
-    }
     cameraGeneration.current += 1;
-    if (videoRef.current) trackerRef.current?.stopCamera(videoRef.current, true);
+    // Stop is deliberately idempotent and does not depend on the Web Lock
+    // bookkeeping being in sync with the DOM video. A stale ownership flag
+    // must never leave a live MediaStream behind during a Demo handoff.
+    if (videoRef.current && trackerRef.current) trackerRef.current.stopCamera(videoRef.current, true);
+    // The DOM video is the final authority during a handoff. If a stale
+    // tracker reference ever differs from the element that owns the stream,
+    // stop those tracks directly as well so Demo Lab cannot see a phantom
+    // dashboard owner.
+    const activeVideo = videoRef.current;
+    const activeStream = activeVideo?.srcObject;
+    if (activeVideo && activeStream instanceof MediaStream) {
+      activeStream.getTracks().forEach((track) => track.stop());
+      activeVideo.pause();
+      activeVideo.srcObject = null;
+    }
     cameraOwnership.current.release();
     cameraThumbnail.current.reset();
     clearTrackingOverlay(overlayRef.current);
@@ -499,6 +544,23 @@ export function Dashboard() {
     }
   }
 
+  async function transferCameraToDemoLab(): Promise<void> {
+    if (!trackerRef.current?.camera.currentStream) {
+      setNotice('Start the dashboard camera first, then transfer its live session to Demo Lab.');
+      return;
+    }
+    // Demo Lab owns its own video element and MediaPipe session. Release the
+    // dashboard lock before opening it so the two surfaces never compete for
+    // one camera or create a second inference loop.
+    stopCamera();
+    const response = await sendMessage({ type: 'OPEN_DEMO_LAB' });
+    if (response?.type === 'TOUCHVIEW_ERROR') {
+      setNotice(response.reason);
+      return;
+    }
+    setNotice('Dashboard camera released. Demo Lab will request the same camera for its live stage.');
+  }
+
   function togglePause() {
     lossPauseSent.current = false;
     const nextPaused = !settings.paused;
@@ -549,13 +611,30 @@ export function Dashboard() {
   }
 
   async function startCalibration() {
-    const video = videoRef.current;
-    if (!video || !trackerRef.current) return;
+    let video = videoRef.current;
+    const tracker = trackerRef.current;
+    if (!video || !tracker) {
+      setNotice('Calibration is still loading. Wait a moment and retry.');
+      return;
+    }
+    const currentSettings = settingsRef.current;
     const input = calibrationInput;
-    if (!settings.enabledModes.includes(input)) {
+    if (!currentSettings.enabledModes.includes(input)) {
       await selectCalibrationSource(input);
       if (!settingsRef.current.enabledModes.includes(input)) {
         setNotice(`${input === 'hand' ? 'Hand' : 'Head'} tracking could not be enabled. Check the camera and retry.`);
+        return;
+      }
+    }
+    if (!tracker.camera.currentStream) {
+      const started = await startCamera(settingsRef.current);
+      if (!started) {
+        setNotice('Calibration could not start because the camera is unavailable. Check permission and retry.');
+        return;
+      }
+      video = videoRef.current;
+      if (!video || !tracker.camera.currentStream) {
+        setNotice('The camera started, but its preview is not ready yet. Retry calibration.');
         return;
       }
     }
@@ -566,7 +645,7 @@ export function Dashboard() {
     resetValidationUi(`Hold your ${input === 'hand' ? 'fingertip' : 'head reference'} over the highlighted target until the progress completes.`);
     setSampleCount(0); setSampleStability(1); setSampleConfidence(0); setCaptureReady(false); setCaptureMessage('Waiting for a stable tracked point.');
     stableSamples.current = { head: [], hand: [] };
-    trackerRef.current.updateSettings(settingsRef.current);
+    tracker.updateSettings(settingsRef.current);
     setCalibrationStep('top-left');
     setCalibrationHint(`Move your ${input === 'hand' ? 'fingertip' : 'head reference'} to the top-left target, then keep it steady.`);
     // The calibration overlay becomes the camera surface on the next paint.
@@ -658,10 +737,12 @@ export function Dashboard() {
   function testCalibration() {
     if (!settings.calibration || !videoRef.current || !trackerRef.current?.camera.currentStream) { setNotice('Start the camera and save a calibration before testing it.'); return; }
     pendingCalibration.current = settings.calibration;
+    const savedSource = settings.calibration.input === 'mixed' ? calibrationInput : settings.calibration.input;
+    setCalibrationInput(savedSource);
+    calibrationSource.current = savedSource;
     setCalibrationMappingReady(true);
     invalidateValidation();
-    resetValidationUi(`Hold your ${calibrationInput === 'hand' ? 'fingertip' : 'head reference'} over the highlighted target until the progress completes.`);
-    calibrationSource.current = calibrationInput;
+    resetValidationUi(`Hold your ${savedSource === 'hand' ? 'fingertip' : 'head reference'} over the highlighted target until the progress completes.`);
     beginValidation();
     setCalibrationStep('test');
   }
@@ -696,12 +777,12 @@ export function Dashboard() {
       <section className="hero"><div><span className="eyebrow">TouchView control center</span><h1>Your hand. Your web.</h1><p>Enable TouchView, keep your hand in view, and calibrate once. Point to a webpage control and pinch or hold to select it.</p></div><div className="status-strip"><StatusPill label={settings.enabled ? 'HandFree on' : 'HandFree off'} tone={settings.enabled ? 'good' : 'neutral'} /><StatusPill label={phase} tone={trackingTone} /></div></section>
       {status.error && <div className="error-banner" role="alert"><Icon name="warning" /><span><strong>{status.diagnostic?.title ?? 'HandFree needs attention'}</strong><span>{status.diagnostic?.explanation ?? status.error}</span>{status.diagnostic?.recovery && <small>{status.diagnostic.recovery}</small>}</span></div>}
       {notice && <p className="notice" role="status"><Icon name="info" /><span>{notice}</span></p>}
-      <TouchViewControls settings={settings} busy={touchViewBusy || startingCamera} setTouchView={setTouchView} onSettings={patch => void persist(patch)} />
+      <TouchViewControls settings={settings} busy={touchViewBusy || startingCamera} cameraActive={status.permission === 'active'} setTouchView={setTouchView} onTransfer={() => void transferCameraToDemoLab()} onSettings={patch => void persist(patch)} />
       <div className="dashboard-grid">
         <div className="stack">
-          <section className="card card--accent"><SectionHeading eyebrow="01 · Control" title="Main controls" description="Camera setup and optional head tracking share the TouchView overlay." /><div className="control-row"><div className="control-copy"><strong>HandFree enabled</strong><span>Allow the in-page pointer to receive tracking updates.</span></div><Toggle checked={settings.enabled} label="Enable HandFree" disabled={touchViewBusy || startingCamera} onChange={(value) => value ? void setTouchView(true, { enabledModes: settings.enabledModes }) : stopCamera()} /></div><div className="control-row"><div className="control-copy"><strong>Head Control</strong><span>Use face landmarks to move the virtual pointer. You can change this before or after camera setup.</span></div><Toggle checked={settings.headControlEnabled} label="Enable Head Control" disabled={touchViewBusy || startingCamera} onChange={(value) => changeModes({ headControlEnabled: value, enabledModes: value ? Array.from(new Set([...settings.enabledModes, 'head'])) : settings.enabledModes.filter(mode => mode !== 'head') })} /></div><div className="button-row" style={{ marginTop: 18 }}><button className="button button--primary" onClick={() => void startCamera()} disabled={status.permission === 'active' || startingCamera}><Icon name="camera" />{startingCamera ? 'Requesting camera permission…' : status.permission === 'active' ? 'Camera active' : 'Start camera setup'}</button><button className="button button--danger" onClick={stopCamera} disabled={status.permission !== 'active' && status.permission !== 'paused'}>Stop camera</button></div></section>
+          <section className="card card--accent"><SectionHeading eyebrow="01 · Control" title="Main controls" description="Camera setup and optional head tracking share the TouchView overlay." /><div className="control-row"><div className="control-copy"><strong>HandFree enabled</strong><span>Allow the in-page pointer to receive tracking updates.</span></div><Toggle checked={settings.enabled} label="Enable HandFree" disabled={touchViewBusy || startingCamera} onChange={(value) => value ? void setTouchView(true, { enabledModes: settings.enabledModes }) : stopCamera()} /></div><div className="control-row"><div className="control-copy"><strong>Head Control</strong><span>Use face landmarks to move the virtual pointer. You can change this before or after camera setup.</span></div><Toggle checked={settings.headControlEnabled} label="Enable Head Control" disabled={touchViewBusy || startingCamera} onChange={(value) => changeModes({ headControlEnabled: value, enabledModes: value ? Array.from(new Set([...settings.enabledModes, 'head'])) : settings.enabledModes.filter(mode => mode !== 'head') })} /></div><div className="button-row" style={{ marginTop: 18 }}><button className="button button--primary" onClick={() => void startCamera()} disabled={status.permission === 'active' || startingCamera}><Icon name="camera" />{startingCamera ? 'Requesting camera permission…' : status.permission === 'active' ? 'Camera active' : 'Start camera setup'}</button><button className="button button--danger" onClick={stopCamera}>Stop camera</button></div></section>
            <section className="card"><SectionHeading eyebrow="02 · Live view" title="Camera and tracking" description="The colored dots show live model landmarks: cyan for head tracking and green for hand tracking." /><div className="camera-layout"><div className={`camera-visual${calibrationActive ? ' camera-visual--calibrating' : ''}`}><video ref={videoRef} style={{ transform: settings.mirrorCamera ? 'scaleX(-1)' : 'none', opacity: settings.touchViewCameraOpacity }} playsInline aria-label="Live camera preview" /><canvas ref={overlayRef} className="tracking-overlay" aria-hidden="true" /><div className="tracking-legend" aria-live="polite">{settings.enabledModes.includes('head') && <span className={`tracking-chip ${status.faceDetected ? '' : 'tracking-chip--searching'}`}><span className="tracking-chip__dot" aria-hidden="true" />Head dots <span className="tracking-chip__state">{status.faceDetected ? 'detected' : status.cameraState === 'active' ? 'searching' : 'ready'}</span></span>}<span className={`tracking-chip tracking-chip--hand ${settings.enabledModes.includes('hand') && status.handTracking !== 'tracking' ? 'tracking-chip--searching' : ''}`}><span className="tracking-chip__dot" aria-hidden="true" />Hand dots <span className="tracking-chip__state">{!settings.enabledModes.includes('hand') ? 'off · enable TouchView' : status.handTracking === 'tracking' ? 'detected' : status.cameraState === 'active' ? 'searching' : 'ready'}</span></span></div>{status.cameraState === 'active' && <p className="tracking-capture-note">Live capture on · dots update with each camera frame</p>}{status.cameraState !== 'active' && <div className="camera-placeholder"><div><Icon name="camera" /><strong>{status.cameraState === 'error' ? 'Camera error' : 'Camera is off'}</strong><span>Choose Start camera setup to request access.</span></div></div>}</div><div className="camera-side">{cameraList.length > 0 && <label className="select-label">Camera<select disabled={status.cameraState === 'active' || startingCamera} title="Stop the camera before switching devices" value={selectedCamera} onChange={(event) => setSelectedCamera(event.target.value)}>{cameraList.map((camera) => <option value={camera.deviceId} key={camera.deviceId}>{camera.label}</option>)}</select></label>}<div className="metric"><span>Camera</span><strong>{status.cameraState === 'active' ? 'Active' : status.cameraState === 'error' ? 'Error' : status.cameraState === 'paused' ? 'Paused' : 'Stopped'}</strong></div><div className="metric"><span>Face</span><strong>{status.cameraState === 'active' && status.faceDetected ? 'Detected' : 'Not detected'}</strong></div><div className="metric"><span>Hand</span><strong>{status.cameraState === 'active' && status.handTracking === 'tracking' ? 'Detected' : settings.enabledModes.includes('hand') ? 'Not detected' : 'Off'}</strong></div><div className="metric"><span>Estimated confidence</span><strong>{formatConfidence(status.confidence)}</strong><div className="quality-bar" aria-label={`Estimated tracking confidence ${formatConfidence(status.confidence)}`}><span style={{ width: `${(validConfidence(status.confidence) ?? 0) * 100}%` }} /></div></div></div></div></section>
-           <section className="card"><SectionHeading eyebrow="03 · Calibration" title="Calibrate once for every mode" description="The live camera and real face/hand coordinates are used to build one global mapping for TouchView, head tracking, hand tracking, and Demo Lab." /><p className="privacy-copy">Camera: {cameraList.find(camera => camera.deviceId === trackerRef.current?.camera.currentDeviceId)?.label ?? 'Not selected'} · Mirror: {settings.mirrorCamera ? 'On' : 'Off'} · Quality: {settings.calibration ? `${Math.round(settings.calibration.quality * 100)}%${settings.calibration.qualityStatus === 'estimated' ? ' · estimated' : ''}` : 'Required'} · Last saved: {settings.calibration ? new Date(settings.calibration.createdAt).toLocaleString() : 'Never'}</p><div className="calibration-source-control"><label className="select-label">Calibration source<select aria-label="Calibration source" value={calibrationInput} disabled={calibrationActive || startingCamera} onChange={(event) => void selectCalibrationSource(event.target.value as 'head' | 'hand')}><option value="hand">Hand · index fingertip</option><option value="head">Head · face reference</option></select></label><span className="calibration-source-status">{calibrationInput === 'hand' ? status.handTracking === 'tracking' ? 'Hand detected' : 'Hand not detected' : status.faceDetected ? 'Face detected' : 'Face not detected'}</span></div>{calibrationStep === 'idle' ? <div className="step-card"><span className="step-number">1</span><div><strong>{settings.calibration ? 'Shared calibration saved' : 'Capture four corners from the live camera'}</strong><p>Start the camera first, choose a real tracking source, then hold its landmark over each large target. Invalid or moving samples cannot be saved.</p><div className="button-row" style={{ marginTop: 12 }}><button className="button button--primary" onClick={() => void startCalibration()} disabled={status.permission !== 'active'}><Icon name="target" />Start calibration</button><button className="button" onClick={recenter} disabled={status.permission !== 'active'}><Icon name="crosshair" />Recenter</button><button className="button" onClick={testCalibration} disabled={!settings.calibration || status.permission !== 'active'}>Test calibration</button><button className="button button--danger" onClick={() => { cancelCalibration(); void persist({ calibration: null, touchViewCalibration: null }); }}>Reset calibration</button></div></div></div> : <div className="stack" style={{ gap: 14 }}><div className="step-card"><span className="step-number">{calibrationStep === 'complete' ? '✓' : calibrationStep === 'test' ? 'T' : ['top-left','top-right','bottom-left','bottom-right'].indexOf(calibrationStep) + 1}</span><div><strong>{calibrationStep === 'complete' ? 'Calibration complete' : calibrationStep === 'test' ? 'Test the mapping' : `Capture ${calibrationStep.replace('-', ' ')}`}</strong><p>{calibrationHint}</p></div></div><div className="calibration-sample-summary"><strong>{captureMessage}</strong><span>{sampleCount} samples · {Math.round(sampleConfidence * 100)}% confidence · {Math.round(sampleStability * 1000) / 10}% spread</span></div><div className="button-row"><button className="button button--primary" onClick={captureCalibrationStep} disabled={calibrationStep === 'test' || !captureReady}>{calibrationStep === 'test' ? 'Mapping ready' : 'Capture stable sample'}</button><button className="button" onClick={cancelCalibration}>Cancel</button>{calibrationStep === 'test' && <><button className="button button--primary" disabled={!calibrationMappingReady} onClick={() => void acceptCalibration()}>Accept calibration</button><button className="button" disabled={!calibrationMappingReady} onClick={() => void acceptCalibration('skipped')}>Skip validation</button></>}</div></div>}</section>
+           <section className="card"><SectionHeading eyebrow="03 · Calibration" title="Calibrate once for every mode" description="The live camera and real face/hand coordinates are used to build one global mapping for TouchView, head tracking, hand tracking, and Demo Lab." /><p className="privacy-copy">Camera: {cameraList.find(camera => camera.deviceId === trackerRef.current?.camera.currentDeviceId)?.label ?? 'Not selected'} · Mirror: {settings.mirrorCamera ? 'On' : 'Off'} · Quality: {settings.calibration ? `${Math.round(settings.calibration.quality * 100)}%${settings.calibration.qualityStatus === 'estimated' ? ' · estimated' : ''}` : 'Required'} · Last saved: {settings.calibration ? new Date(settings.calibration.createdAt).toLocaleString() : 'Never'}</p><div className="calibration-source-control"><label className="select-label">Calibration source<select aria-label="Calibration source" value={calibrationInput} disabled={calibrationActive || startingCamera} onChange={(event) => void selectCalibrationSource(event.target.value as 'head' | 'hand')}><option value="hand">Hand · index fingertip</option><option value="head">Head · face reference</option></select></label><span className="calibration-source-status">{calibrationInput === 'hand' ? status.handTracking === 'tracking' ? 'Hand detected' : 'Hand not detected' : status.faceDetected ? 'Face detected' : 'Face not detected'}</span></div>{calibrationStep === 'idle' ? <div className="step-card"><span className="step-number">1</span><div><strong>{settings.calibration ? 'Shared calibration saved' : 'Capture four corners from the live camera'}</strong><p>Start the camera first, choose a real tracking source, then hold its landmark over each large target. Invalid or moving samples cannot be saved.</p><div className="button-row" style={{ marginTop: 12 }}><button type="button" className="button button--primary" onClick={() => void startCalibration()} disabled={startingCamera}><Icon name="target" />{startingCamera ? 'Starting camera…' : 'Start calibration'}</button><button type="button" className="button" onClick={recenter} disabled={status.permission !== 'active'}><Icon name="crosshair" />Recenter</button><button type="button" className="button" onClick={testCalibration} disabled={!settings.calibration || status.permission !== 'active'}>Test calibration</button><button type="button" className="button button--danger" onClick={() => { cancelCalibration(); void persist({ calibration: null, touchViewCalibration: null }); }}>Reset calibration</button></div></div></div> : <div className="stack" style={{ gap: 14 }}><div className="step-card"><span className="step-number">{calibrationStep === 'complete' ? '✓' : calibrationStep === 'test' ? 'T' : ['top-left','top-right','bottom-left','bottom-right'].indexOf(calibrationStep) + 1}</span><div><strong>{calibrationStep === 'complete' ? 'Calibration complete' : calibrationStep === 'test' ? 'Test the mapping' : `Capture ${calibrationStep.replace('-', ' ')}`}</strong><p>{calibrationHint}</p></div></div><div className="calibration-sample-summary"><strong>{captureMessage}</strong><span>{sampleCount} samples · {Math.round(sampleConfidence * 100)}% confidence · {Math.round(sampleStability * 1000) / 10}% spread</span></div><div className="button-row"><button type="button" className="button button--primary" onClick={captureCalibrationStep} disabled={calibrationStep === 'test' || !captureReady}>{calibrationStep === 'test' ? 'Mapping ready' : 'Capture stable sample'}</button><button type="button" className="button" onClick={cancelCalibration}>Cancel</button>{calibrationStep === 'test' && <><button type="button" className="button button--primary" disabled={!calibrationMappingReady} onClick={() => void acceptCalibration()}>{validationComplete ? 'Accept validated calibration' : 'Accept calibration'}</button><button type="button" className="button" disabled={!calibrationMappingReady} onClick={() => void acceptCalibration('skipped')}>Skip validation</button></>}</div></div>}</section>
         </div>
         <aside className="stack"><section className="card"><SectionHeading eyebrow="Quick controls" title="Interaction" /><div className="control-row"><div className="control-copy"><strong>{settings.paused ? 'Resume interaction' : 'Pause interaction'}</strong><span>{settings.paused ? 'Wait for a stable face before movement resumes.' : 'Stops pointer actions and cancels dwell now.'}</span></div><button className="button" onClick={togglePause} disabled={!settings.enabled}><Icon name={settings.paused ? 'play' : 'pause'} />{settings.paused ? 'Resume' : 'Pause'}</button></div><div className="button-row" style={{ marginTop: 14 }}><button className="button" onClick={recenter}><Icon name="crosshair" />Recenter pointer</button><button className="button button--danger" onClick={stopCamera}>Emergency disable</button></div></section><section id="tuning" className="card"><SectionHeading eyebrow="Tuning" title="Comfort settings" description="Changes are saved locally and shared with the side panel." /><div className="slider-control"><label className="slider-label" htmlFor="sensitivity"><span>Sensitivity</span><output>{settings.sensitivity.toFixed(1)}×</output></label><input id="sensitivity" className="range" type="range" min=".5" max="1.8" step=".1" value={settings.sensitivity} onChange={(event) => void persist({ sensitivity: Number(event.target.value) })} /></div><div className="slider-control"><label className="slider-label" htmlFor="dwell"><span>Dwell duration</span><output>{settings.dwellDuration} ms</output></label><input id="dwell" className="range" type="range" min="500" max="2500" step="100" value={settings.dwellDuration} onChange={(event) => void persist({ dwellDuration: Number(event.target.value) })} /></div><div className="slider-control"><label className="slider-label" htmlFor="smoothing"><span>Pointer smoothing</span><output>{Math.round(settings.smoothing * 100)}%</output></label><input id="smoothing" className="range" type="range" min=".2" max=".92" step=".04" value={settings.smoothing} onChange={(event) => void persist({ smoothing: Number(event.target.value) })} /></div><div className="control-row"><div className="control-copy"><strong>Dwell selection</strong><span>Click only after the pointer stays on one valid target.</span></div><Toggle checked={settings.dwellEnabled} label="Enable dwell selection" onChange={(value) => void persist({ dwellEnabled: value })} /></div></section><section className="card"><SectionHeading eyebrow="Try it safely" title="Demo Lab" description="A small page with real controls for testing highlighting, dwell cancellation, and repeat-click prevention." /><a className="link-card" href={extensionUrl('demo.html')}><span><strong>Open HandFree Demo Lab</strong><span>Buttons, a form, and closely spaced targets.</span></span><Icon name="arrow" /></a></section><section className="card"><div className="notice"><Icon name="shield" /><span className="privacy-copy"><strong>Privacy by default.</strong> One dashboard owns the camera at a time. Use Stop camera to end capture. While TouchView is enabled, pointer coordinates and a small camera thumbnail are sent to the connected webpage.</span></div></section></aside>
       </div>

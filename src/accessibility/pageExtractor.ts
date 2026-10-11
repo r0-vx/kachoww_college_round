@@ -20,7 +20,7 @@ function getAccessibleName(element: HTMLElement): string {
 }
 
 export function extractPageIndex(root: ParentNode = document): PageNode[] {
-  const elements = Array.from(root.querySelectorAll<HTMLElement>('h1,h2,h3,h4,h5,h6,main,nav,header,footer,aside,section,article,form,button,a[href],input,select,textarea,[role],table,th,td,[aria-live]'));
+  const elements = Array.from(root.querySelectorAll<HTMLElement>('h1,h2,h3,h4,h5,h6,p,main,nav,header,footer,aside,section,article,form,button,a[href],input,select,textarea,ul,ol,li,label,[role],table,th,td,[aria-live]'));
   let section = '';
   return elements.map((element, index) => {
     const role = getRole(element);
@@ -52,6 +52,27 @@ export function answerPageQuery(nodes: PageNode[], query: string): string {
   const lower = query.toLowerCase();
   if (/heading/.test(lower)) return rankPageContent(nodes.filter((node) => node.role === 'heading')).map((node) => node.accessibleName).filter(Boolean).join('. ') || 'There are no headings on this page.';
   if (/button/.test(lower)) return rankPageContent(nodes.filter((node) => node.role === 'button' && node.visible && !node.disabled)).map((node) => node.accessibleName).filter(Boolean).join(', ') || 'There are no available buttons.';
+  const focused = nodes.filter((node) => node.visible && node.text && !['main', 'article', 'section', 'nav', 'header', 'footer', 'form', 'ul', 'ol'].includes(node.role));
+  if (/deadline/.test(lower)) {
+    const sectionMatches = focused.filter((node) => /application deadline/i.test(node.parentSection ?? ''));
+    const matches = sectionMatches.length ? sectionMatches : focused.filter((node) => /deadline/i.test(`${node.accessibleName} ${node.text}`));
+    return rankPageContent(matches, 'deadline').slice(0, 2).map((node) => node.text || node.accessibleName).join('. ') || 'I could not find a deadline on this page.';
+  }
+  if (/eligib/.test(lower)) {
+    const sectionMatches = focused.filter((node) => /eligib/i.test(node.parentSection ?? ''));
+    const matches = sectionMatches.length ? sectionMatches : focused.filter((node) => /eligib/i.test(`${node.accessibleName} ${node.text}`));
+    return rankPageContent(matches, 'eligibility').slice(0, 3).map((node) => node.text || node.accessibleName).join('. ') || 'I could not find eligibility requirements on this page.';
+  }
+  if (/document|requirement/.test(lower)) {
+    const sectionMatches = focused.filter((node) => /document|requirement/i.test(node.parentSection ?? ''));
+    const matches = sectionMatches.length ? sectionMatches : focused.filter((node) => /document|requirement/i.test(`${node.accessibleName} ${node.text}`));
+    return rankPageContent(matches, 'documents').slice(0, 5).map((node) => node.text || node.accessibleName).join('. ') || 'I could not find required documents on this page.';
+  }
+  if (/where.*apply|application link|apply/.test(lower)) {
+    const sectionMatches = focused.filter((node) => /apply|application|contact/i.test(node.parentSection ?? ''));
+    const matches = sectionMatches.length ? sectionMatches : focused.filter((node) => /apply|application|contact/i.test(`${node.accessibleName} ${node.text}`));
+    return rankPageContent(matches, 'apply').slice(0, 4).map((node) => node.text || node.accessibleName).join('. ') || 'I could not find an application link on this page.';
+  }
   if (/important|deadline|eligib|document|requirement|fee|award|apply/.test(lower)) return rankPageContent(nodes, lower).filter((node) => node.text).slice(0, 6).map((node) => node.text || node.accessibleName).join('. ') || 'I could not find important information on this page.';
   return rankPageContent(nodes, lower).filter((node) => node.text).slice(0, 4).map((node) => node.text || node.accessibleName).join('. ') || 'I could not find enough page content to summarize.';
 }

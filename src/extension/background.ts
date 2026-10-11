@@ -22,6 +22,11 @@ function isHandFreeNewTabUrl(url = ''): boolean {
   return url.split(/[?#]/)[0] === chrome.runtime.getURL('newtab.html');
 }
 
+function isInternalPracticeSurface(url = ''): boolean {
+  const page = url.split(/[?#]/)[0];
+  return page === chrome.runtime.getURL('demo.html') || page === chrome.runtime.getURL('touchview.html');
+}
+
 async function broadcastNewTabState(): Promise<void> {
   await chrome.runtime.sendMessage({ type: 'NEW_TAB_STATE', settings, status }).catch(() => undefined);
 }
@@ -295,6 +300,13 @@ async function sendToTab(message: HandFreeMessage, tabId?: number): Promise<bool
   }
 }
 
+async function sendToInternalPractice(message: HandFreeMessage, tab: chrome.tabs.Tab): Promise<HandFreeMessage | undefined> {
+  if (tab.id === undefined || !isInternalPracticeMessage(tab.url, message)) return undefined;
+  // Extension pages cannot receive content-script messages through tabs.sendMessage.
+  // Their own runtime listener is the canonical bridge for the Demo Lab practice UI.
+  try { return await chrome.runtime.sendMessage(message) as HandFreeMessage | undefined; } catch { return undefined; }
+}
+
 async function getActiveTabStatus(): Promise<HandFreeMessage> {
   const tab = await activeTab();
   const supported = Boolean(tab?.id !== undefined && (isHandFreeNewTabUrl(tab.url) || !isRestrictedUrl(tab.url)));
@@ -438,6 +450,14 @@ async function handleMessage(message: HandFreeMessage, sender: chrome.runtime.Me
         await chrome.runtime.sendMessage({ type: 'NEW_TAB_POINTER_UPDATE', position: message.position, gesture: message.gesture }).catch(() => undefined);
         return undefined;
       }
+      // Extension pages cannot receive a content-script message, but the
+      // controlled Demo Lab and TouchView practice page are still real DOM
+      // surfaces. Broadcast only while one of those pages is the active tab;
+      // its runtime listener owns the in-page interaction bridge.
+      if (isInternalPracticeSurface(browserActive?.url) && settings.enabled && (settings.touchViewEnabled || settings.headControlEnabled || settings.enabledModes.includes('hand'))) {
+        await chrome.runtime.sendMessage(message).catch(() => undefined);
+        return undefined;
+      }
       const tab = await activeTab();
       if (tab?.id === undefined || !settings.touchViewEnabled || !touchViewTabs.has(tab.id) || settings.paused || settings.touchViewPaused) return undefined;
       if (![message.position.x, message.position.y, message.position.confidence].every(Number.isFinite)) return undefined;
@@ -475,7 +495,10 @@ async function handleMessage(message: HandFreeMessage, sender: chrome.runtime.Me
     case 'PAGE_STRUCTURE_REQUEST':
       {
         const tab = await messageTarget(message);
-        if (tab?.id !== undefined) await sendToTab(message, tab.id);
+        if (tab?.id !== undefined) {
+          if (isInternalPracticeMessage(tab.url, message)) return await sendToInternalPractice(message, tab);
+          await sendToTab(message, tab.id);
+        }
       }
       return undefined;
     case 'SENSE_QUERY': {
@@ -484,6 +507,7 @@ async function handleMessage(message: HandFreeMessage, sender: chrome.runtime.Me
         return { type: 'PAGE_UNSUPPORTED', reason: 'Sense cannot read this page because the browser does not allow access to its content.' };
       }
       try {
+        if (isInternalPracticeMessage(tab.url, message)) return await sendToInternalPractice(message, tab) ?? contentScriptError('background.sense.internal');
         const response = await chrome.tabs.sendMessage(tab.id, message) as HandFreeMessage | undefined;
         if (response?.type === 'SENSE_RESPONSE' || response?.type === 'PAGE_UNSUPPORTED' || response?.type === 'TOUCHVIEW_ERROR') return response;
         return contentScriptError('background.sense');
@@ -558,6 +582,17 @@ async function handleMessage(message: HandFreeMessage, sender: chrome.runtime.Me
       const tab = await activeTab();
       if (tab?.id) await chrome.sidePanel.open({ tabId: tab.id });
       return undefined;
+    }
+    case 'OPEN_DEMO_LAB': {
+      const url = chrome.runtime.getURL('demo.html');
+      const existing = (await chrome.tabs.query({})).find((tab) => tab.id !== undefined && tab.url?.split(/[?#]/)[0] === url);
+      if (existing?.id !== undefined) {
+        await chrome.tabs.update(existing.id, { active: true });
+        await chrome.windows.update(existing.windowId, { focused: true });
+      } else {
+        await chrome.tabs.create({ url, active: true });
+      }
+      return { type: 'STATE_RESPONSE', settings, status };
     }
     case 'OPEN_NEW_TAB':
       await chrome.tabs.create({});

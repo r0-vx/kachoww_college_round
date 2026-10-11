@@ -4,7 +4,8 @@ export type VoiceIntent =
   | { type: 'reload' }
   | { type: 'click'; query?: string }
   | { type: 'focus'; query: string }
-  | { type: 'review-form' | 'next-field' | 'previous-field' | 'clear-field' | 'cancel' | 'confirm' | 'pause' | 'resume' | 'recenter' | 'help' | 'read-headings' | 'read-important' | 'read-about' | 'read-section' | 'stop-reading' | 'repeat' | 'list-buttons' | 'main-content' | 'new-tab' };
+  | { type: 'read-query'; query: string }
+  | { type: 'start-dictation' | 'stop-dictation' | 'review-form' | 'next-field' | 'previous-field' | 'clear-field' | 'cancel' | 'confirm' | 'pause' | 'resume' | 'recenter' | 'help' | 'read-headings' | 'read-important' | 'read-about' | 'read-section' | 'stop-reading' | 'repeat' | 'list-buttons' | 'main-content' | 'new-tab' };
 
 export function parseVoiceCommand(input: string): VoiceIntent | null {
   const text = input.trim().toLowerCase().replace(/[?.!]+$/g, '');
@@ -15,6 +16,8 @@ export function parseVoiceCommand(input: string): VoiceIntent | null {
   if (/^(go )?forward$/.test(text)) return { type: 'history', direction: 'forward' };
   if (/^(reload|refresh)( the page)?$/.test(text)) return { type: 'reload' };
   if (/^(click|activate)( the)?( .+)?$/.test(text)) return { type: 'click', query: text.replace(/^(click|activate)( the)?/, '').trim() || undefined };
+  if (/^(start|begin) dictation$/.test(text)) return { type: 'start-dictation' };
+  if (/^(stop|end) dictation$/.test(text)) return { type: 'stop-dictation' };
   const focus = text.match(/^(focus|select|go to) (?:the )?(.+?)( field)?$/);
   if (focus) return { type: 'focus', query: focus[2].trim() };
   if (/^next field$/.test(text)) return { type: 'next-field' };
@@ -30,6 +33,10 @@ export function parseVoiceCommand(input: string): VoiceIntent | null {
   if (/^(read )?headings$/.test(text) || text === 'read headings') return { type: 'read-headings' };
   if (/^(read )?(important information|important content)$/.test(text)) return { type: 'read-important' };
   if (/^(what is this page about|read about this page)$/.test(text)) return { type: 'read-about' };
+  if (/^(what is|read)( the)? deadline$/.test(text)) return { type: 'read-query', query: 'deadline' };
+  if (/^(what are|read)( the)? (eligibility requirements|eligibility)$/.test(text)) return { type: 'read-query', query: 'eligibility requirements' };
+  if (/^(what|which)( documents are required|documents do i need)$/.test(text) || /^read (the )?required documents$/.test(text)) return { type: 'read-query', query: 'required documents' };
+  if (/^(where can i|where do i) apply$/.test(text) || /^read (the )?application link$/.test(text)) return { type: 'read-query', query: 'where can i apply' };
   if (/^read (this )?section$/.test(text)) return { type: 'read-section' };
   if (/^(stop reading|quiet)$/.test(text)) return { type: 'stop-reading' };
   if (/^repeat( that)?$/.test(text)) return { type: 'repeat' };

@@ -139,6 +139,7 @@ export interface HandFreeSettings {
   voiceActivation: 'manual' | 'wake-word';
   speechRate: number;
   speechVolume: number;
+  senseVerbosity: 'brief' | 'standard' | 'detailed';
   audioFirstMode: boolean;
   analyticsEnabled: boolean;
   touchViewEnabled: boolean;
@@ -193,6 +194,8 @@ export interface RuntimeStatus {
   activePointerLoops: number;
   performance?: TrackingPerformance;
   recentAnalytics?: AnalyticsEvent[];
+  /** Latest real camera thumbnail emitted by the shared tracking session. */
+  cameraFrame?: string;
 }
 
 export interface PointerPosition {
@@ -290,6 +293,7 @@ export type HandFreeMessage =
   | { type: 'GET_ACTIVE_TAB_STATUS' }
   | { type: 'ACTIVE_TAB_STATUS'; status: Pick<RuntimeStatus, 'currentTabSupported' | 'currentTabTitle' | 'currentTabUrl' | 'error' | 'diagnostic'> }
   | { type: 'OPEN_SIDE_PANEL' }
+  | { type: 'OPEN_DEMO_LAB' }
   | { type: 'OPEN_NEW_TAB' };
 
 export const DEFAULT_SETTINGS: HandFreeSettings = {
@@ -309,6 +313,7 @@ export const DEFAULT_SETTINGS: HandFreeSettings = {
   voiceActivation: 'manual',
   speechRate: 1,
   speechVolume: 1,
+  senseVerbosity: 'standard',
   audioFirstMode: false,
   analyticsEnabled: true,
   touchViewEnabled: false,

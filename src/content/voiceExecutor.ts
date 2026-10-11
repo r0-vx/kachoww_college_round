@@ -13,7 +13,12 @@ function interactiveMatches(query?: string): HTMLElement[] {
   const elements = Array.from(document.querySelectorAll<HTMLElement>('button,a[href],input,select,textarea,[role="button"],[onclick]')).filter((element) => !element.hidden && !(element as HTMLButtonElement).disabled && element.getAttribute('aria-disabled') !== 'true');
   if (!query) return elements;
   const wanted = query.toLowerCase();
-  return elements.filter((element) => nameOf(element).toLowerCase().includes(wanted) || element.getAttribute('name')?.toLowerCase().includes(wanted));
+  const roleFree = wanted.replace(/\b(button|link|field|input|control)\b/g, '').replace(/\s+/g, ' ').trim();
+  return elements.filter((element) => {
+    const name = nameOf(element).toLowerCase();
+    const fieldName = element.getAttribute('name')?.toLowerCase() ?? '';
+    return name.includes(wanted) || fieldName.includes(wanted) || Boolean(roleFree && (name.includes(roleFree) || fieldName.includes(roleFree)));
+  });
 }
 function executeIntent(intent: VoiceIntent): void {
   switch (intent.type) {
@@ -95,7 +100,7 @@ export function handleDictation(text: string, isFinal: boolean): void {
 }
 
 export function pageNodes(): PageNode[] { return extractPageIndex(); }
-export function handleSenseQuery(query: string): HandFreeMessage {
+export function handleSenseQuery(query: string): Extract<HandFreeMessage, { type: 'SENSE_RESPONSE' }> {
   const nodes = extractPageIndex().filter(node => node.visible);
   return { type: 'SENSE_RESPONSE', message: answerPageQuery(nodes, query), nodes };
 }

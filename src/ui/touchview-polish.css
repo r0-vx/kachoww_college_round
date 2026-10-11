@@ -50,6 +50,7 @@
 .app-shell .compact-main .button-row .button { flex: 1 1 auto; }
 .app-shell .compact-main .link-card { margin-top: 12px; }
 .app-shell .compact-main .notice { margin: 12px 0; }
+.app-shell .touchview-dashboard-card .privacy-copy { margin: 12px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
 .app-shell .compact-main .control-copy { min-width: 0; }
 .app-shell .compact-main .compact-metric strong { overflow-wrap: anywhere; }
 .app-shell .error-banner span { display: grid; gap: 4px; }

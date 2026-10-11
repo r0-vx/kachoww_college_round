@@ -11,7 +11,7 @@ const browser = await chromium.launchPersistentContext(profile, {
   headless: true, viewport: { width: 1280, height: 900 },
   args: [`--disable-extensions-except=${extension}`, `--load-extension=${extension}`, '--use-fake-ui-for-media-stream']
 });
-const report = { camera: null, rawCameraRetry: null, backgroundCapture: null, calibrationWorkspace: null, microphone: null, recognition: null, runtimeErrors: [], modelLogs: [] };
+const report = { camera: null, rawCameraRetry: null, backgroundCapture: null, dashboardAfterStop: null, calibrationWorkspace: null, demo: null, microphone: null, recognition: null, runtimeErrors: [], modelLogs: [] };
 try {
   const worker = browser.serviceWorkers()[0] || await browser.waitForEvent('serviceworker');
   const id = new URL(worker.url()).host;
@@ -87,7 +87,37 @@ try {
   await new Promise(r => setTimeout(r, 5000));
   report.recognition = await page.evaluate(async () => ({ apiAvailable: Boolean(window.SpeechRecognition || window.webkitSpeechRecognition), status: (await chrome.runtime.sendMessage({ type: 'GET_STATE' }))?.status }));
   const stop = page.getByRole('button', { name: 'Stop listening', exact: true }); if (await stop.isEnabled()) await stop.click();
-  const stopCamera = page.getByRole('button', { name: 'Stop camera', exact: true }); if (await stopCamera.isEnabled()) await stopCamera.click();
+  const stopCamera = page.getByRole('button', { name: 'Stop camera', exact: true }); if (await stopCamera.isEnabled()) await stopCamera.click({ force: true });
+  // Chrome can take a short moment to release the physical device after the
+  // dashboard track is stopped. Give the next owner a deterministic handoff.
+  await new Promise(r => setTimeout(r, 1200));
+  report.dashboardAfterStop = await page.evaluate(async () => ({
+    live: Boolean(document.querySelector('video')?.srcObject?.getVideoTracks().some(track => track.readyState === 'live')),
+    state: (await chrome.runtime.sendMessage({ type: 'GET_STATE' }))?.status,
+    notice: Array.from(document.querySelectorAll('.notice')).map(el => el.textContent)
+  }));
+  report.dashboardAfterStop.stopButtonDisabled = await stopCamera.isDisabled();
+  const demo = await browser.newPage();
+  demo.on('pageerror', e => report.runtimeErrors.push(`demo: ${String(e)}`));
+  demo.on('console', m => { if (/HandFree|Landmarker|model failed/i.test(m.text())) report.modelLogs.push(`demo: ${m.text()}`); });
+  await demo.goto(`chrome-extension://${id}/demo.html`);
+  await demo.getByRole('button', { name: 'Start camera', exact: true }).click();
+  await demo.waitForFunction(() => document.querySelector('video.demo-camera')?.videoWidth > 0, undefined, { timeout: 30000 }).catch(() => undefined);
+  await new Promise(r => setTimeout(r, 1800));
+  report.demo = await demo.evaluate(() => ({
+    live: Boolean(document.querySelector('video.demo-camera')?.srcObject?.getVideoTracks().some(track => track.readyState === 'live')),
+    width: document.querySelector('video.demo-camera')?.videoWidth ?? 0,
+    height: document.querySelector('video.demo-camera')?.videoHeight ?? 0,
+    cameraStatus: document.querySelector('.demo-status-badge')?.textContent,
+    trackingStatus: document.querySelectorAll('.demo-status-badge')[1]?.textContent,
+    cameraMessage: document.querySelector('.demo-camera-message')?.textContent,
+    videoVisible: Boolean(document.querySelector('video.demo-camera') && getComputedStyle(document.querySelector('video.demo-camera')).visibility !== 'hidden'),
+    landmarkCanvas: Boolean(document.querySelector('.demo-landmarks')),
+    instructionVisible: Boolean(document.querySelector('.demo-instructions'))
+  }));
+  if (report.dashboardAfterStop.live) throw new Error('Dashboard handoff did not release its live camera track.');
+  if (!report.demo.live || report.demo.width === 0 || report.demo.height === 0) throw new Error(`Demo Lab camera did not start: ${report.demo.cameraMessage}`);
+  const demoStop = demo.getByRole('button', { name: 'Stop camera', exact: true }); if (await demoStop.isEnabled()) await demoStop.click();
   await mkdir('output', { recursive: true });
   await writeFile('output/hardware-probe.json', JSON.stringify(report, null, 2));
   console.log(JSON.stringify(report, null, 2));

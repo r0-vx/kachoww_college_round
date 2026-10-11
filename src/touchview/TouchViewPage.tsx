@@ -9,6 +9,7 @@ import { calibrationQualityLabel } from './touchViewCalibration';
 import { TouchViewEngine, type TouchViewEngineEvent } from './touchViewEngine';
 import '../ui/global.css';
 import '../ui/touchview.css';
+import '../ui/handfree-theme.css';
 
 type CalibrationStep = 'idle' | 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right' | 'test';
 
@@ -22,6 +23,17 @@ function TouchViewScenario({ onAction }: { onAction: (label: string) => void }) 
   const [form, setForm] = useState({ name: '', choice: 'hand', category: 'accessibility', remember: false, range: 50 });
   const [pendingSubmit, setPendingSubmit] = useState(false);
   const activate = (label: string) => { onAction(label); setMessage(`${label} activated.`); };
+  useEffect(() => {
+    if (!pendingSubmit) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      setPendingSubmit(false);
+      setMessage('Submission review cancelled.');
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [pendingSubmit]);
   const submit = (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); if (!form.name.trim()) { setMessage('Enter a name before reviewing the submission.'); return; } setPendingSubmit(true); setMessage('Submission ready for confirmation.'); };
   const confirm = () => { setPendingSubmit(false); setMessage(`Local submission confirmed for ${form.name}. No data was sent.`); setForm({ name: '', choice: 'hand', category: 'accessibility', remember: false, range: 50 }); onAction('Confirm local submission'); };
   return <section className="touchview-interface" id="touchview-interface" aria-label="TouchView Demo Lab">
@@ -143,7 +155,7 @@ export function TouchViewPage() {
   function stopCamera() { void sendMessage({ type: 'DISABLE_HAND_FREE' }); setNotice('Shared camera stopped from the Control Center.'); }
   function exitTouchView() { void sendMessage({ type: 'DISABLE_TOUCHVIEW' }); void update({ touchViewEnabled: false, touchViewPaused: false }); setNotice('TouchView stopped. The shared camera remains owned by the Control Center.'); analytics('TOUCHVIEW_DISABLED', { outcome: 'success' }); }
   function togglePause() { const paused = !settings.touchViewPaused; void sendMessage({ type: paused ? 'PAUSE_TOUCHVIEW' : 'RESUME_TOUCHVIEW' }); void update({ touchViewPaused: paused, paused }); engineRef.current?.setPaused(paused); setNotice(paused ? 'TouchView paused.' : 'TouchView resumed.'); analytics(paused ? 'TOUCHVIEW_PAUSED' : 'TOUCHVIEW_RESUMED', { outcome: 'success' }); }
-  function beginCalibration() { void openDashboardInTab(); setNotice('Calibration is owned by the Control Center so it can reuse the shared camera.'); analytics('TOUCHVIEW_CALIBRATION_STARTED'); }
+  function beginCalibration() { void openDashboardInTab(undefined, 'calibration'); setNotice('Calibration is opening in the Control Center so it can reuse the shared camera.'); analytics('TOUCHVIEW_CALIBRATION_STARTED'); }
   function captureCalibration() {
     void openDashboardInTab();
     setNotice('Use the four-corner calibration in the Control Center. It is the only calibration source for the extension.');

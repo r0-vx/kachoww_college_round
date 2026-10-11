@@ -61,8 +61,9 @@ export async function findSupportedWebpageTab(): Promise<chrome.tabs.Tab | undef
   return eligible.find(tab => tab.active) ?? eligible[0];
 }
 
-export async function openDashboardInTab(controlTab?: chrome.tabs.Tab): Promise<void> {
+export async function openDashboardInTab(controlTab?: chrome.tabs.Tab, hash = ''): Promise<void> {
   const url = extensionUrl('dashboard.html');
+  const destination = hash ? `${url}#${hash.replace(/^#/, '')}` : url;
   if (isExtensionContext && chrome.tabs?.create) {
     const active = controlTab ?? (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0];
     if (active?.id !== undefined && isControlTargetUrl(active.url)) {
@@ -70,10 +71,10 @@ export async function openDashboardInTab(controlTab?: chrome.tabs.Tab): Promise<
     }
     const existing = (await chrome.tabs.query({})).find(tab => tab.id !== undefined && tab.url?.split(/[?#]/)[0] === url);
     if (existing?.id !== undefined) {
-      await chrome.tabs.update(existing.id, { active: true });
+      await chrome.tabs.update(existing.id, { active: true, ...(hash ? { url: destination } : {}) });
       await chrome.windows.update(existing.windowId, { focused: true });
     } else {
-      await chrome.tabs.create({ url });
+      await chrome.tabs.create({ url: destination });
     }
   } else {
     window.open(url, '_blank', 'noopener,noreferrer');

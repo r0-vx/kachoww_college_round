@@ -44,7 +44,11 @@ export function SenseControls({ settings, onSettings }: { settings: HandFreeSett
       if (responseVersion.current !== version) return;
       if (response?.type === 'SENSE_RESPONSE') { setMessage(response.message); speaker.current?.speak(response.message, preferences.current.speechRate, preferences.current.speechVolume); }
       else if (response?.type === 'PAGE_UNSUPPORTED' || response?.type === 'TOUCHVIEW_ERROR') setMessage(response.reason);
+      else if (!response) setMessage('HandFree Sense could not connect to the active page. Open a supported webpage and retry.');
+      else setMessage('HandFree Sense returned no readable page content.');
       // The dashboard owns audio output; content only extracts page structure.
+    } catch {
+      setMessage('HandFree Sense could not read this page. Check the active tab and retry.');
     } finally { setBusy(false); }
   }
   return <section data-audio-owner="dashboard" className="card sense-controls sense-controls--purple" aria-labelledby="sense-heading"><div className="section-heading"><span className="eyebrow">HandFree Sense</span><h2 id="sense-heading">Read the page structure</h2><p>Read the connected webpage’s headings, landmarks, and important information aloud. Audio is spoken once by this dashboard. Sense complements a screen reader.</p></div><div className="control-row"><div className="control-copy"><strong>Enable Sense</strong><span>Page reading and spoken feedback.</span></div><Toggle checked={enabled} label="Enable HandFree Sense" onChange={toggle} /></div><div className="button-row"><button className="button button--primary" disabled={!enabled || busy} onClick={() => void ask('what is this page about')}>What is this page about?</button><button className="button" disabled={!enabled || busy} onClick={() => void ask('read headings')}>Read headings</button><button className="button" disabled={!enabled || busy} onClick={() => void ask('important information')}>Read important information</button><button className="button" disabled={!enabled} onClick={() => { speaker.current?.stopSpeaking(); setMessage('Reading stopped.'); }}>Stop reading</button></div>{message && <p className="notice" role="status">{message}</p>}</section>;
